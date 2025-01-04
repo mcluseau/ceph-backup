@@ -1,0 +1,43 @@
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: ceph-backup-target
+  name: ceph-backup-target
+  namespace: novit-ceph
+spec:
+  ports:
+  - port: 3310
+  selector:
+    app: ceph-backup-target
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ceph-backup-target
+  labels:
+    app: ceph-backup-target
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ceph-backup-target
+  template:
+    metadata:
+      labels:
+        app: ceph-backup-target
+    spec:
+      containers:
+      - image: mcluseau/ceph-backup
+        name: ceph-backup
+        command: [ "ceph-backup", "rbd-target", "backups", "--bind-addr=0.0.0.0:3310" ]
+        volumeMounts:
+        - mountPath: /etc/ceph
+          name: ceph-config
+          readOnly: true
+        resources: {}
+      volumes:
+      - name: ceph-config
+        secret:
+          secretName: ceph-admin

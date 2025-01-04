@@ -1,0 +1,6 @@
+#! /bin/sh
+exec docker run --rm --user=$UID \
+    -v $HOME/.cargo/registry:/usr/local/cargo/registry \
+    -v $PWD:/src -w /src \
+    mcluseau/rust:1.83.0 \
+    cargo build -r --color=always

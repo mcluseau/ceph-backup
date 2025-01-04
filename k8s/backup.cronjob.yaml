@@ -1,0 +1,28 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: ceph-backup
+spec:
+  schedule: 5 0 * * *
+  concurrencyPolicy: Forbid
+  timeZone: "Etc/UTC"
+  jobTemplate:
+    metadata:
+      name: ceph-backup
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+          - image: mcluseau/ceph-backup
+            name: ceph-backup
+            command: [ "ceph-backup", "rbd", "volumes", "--dest=ceph-backup-target:3310" ]
+            volumeMounts:
+            - mountPath: /etc/ceph
+              name: ceph-config
+              readOnly: true
+            resources: {}
+          volumes:
+          - name: ceph-config
+            secret:
+              secretName: ceph-admin
