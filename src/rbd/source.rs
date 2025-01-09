@@ -1,7 +1,8 @@
 use eyre::{format_err, Result};
+use glob_match::glob_match;
 use log::{error, info, warn};
 
-pub fn run(cluster: &str, pool: &str, dest: &str, compress_level: i32) -> Result<()> {
+pub fn run(cluster: &str, pool: &str, dest: &str, compress_level: i32, filter: &str) -> Result<()> {
     info!("cluster {cluster}, pool {pool}");
 
     let today = now().date_naive();
@@ -9,6 +10,10 @@ pub fn run(cluster: &str, pool: &str, dest: &str, compress_level: i32) -> Result
     let rbd = super::Local::new(cluster, pool);
 
     let images = rbd.ls()?;
+    let images: Vec<_> = images
+        .into_iter()
+        .filter(|img| glob_match(filter, img))
+        .collect();
 
     info!("checking snapshots");
     for img in &images {

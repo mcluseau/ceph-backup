@@ -31,6 +31,9 @@ enum Commands {
         /// zstd compression level (1-22) for transmission
         #[arg(short = 'z', long, default_value = "3")]
         compress_level: i32,
+        /// image name filter
+        #[arg(short = 'F', long, default_value = "*")]
+        filter: String,
     },
     RbdTarget {
         /// target pool
@@ -60,7 +63,8 @@ fn main() -> eyre::Result<()> {
             pool,
             dest,
             compress_level,
-        } => rbd::source::run(&cli.cluster, &pool, &dest, compress_level),
+            filter,
+        } => rbd::source::run(&cli.cluster, &pool, &dest, compress_level, &filter),
         Commands::RbdTarget {
             pool,
             bind_addr,
