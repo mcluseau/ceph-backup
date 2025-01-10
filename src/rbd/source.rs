@@ -52,9 +52,15 @@ pub fn run(cluster: &str, pool: &str, dest: &str, compress_level: i32, filter: &
         let src = src.clone();
         let tgt = tgt.clone();
 
-        if let Err(e) = backup_image(&src, &tgt, &tgt_images, &img) {
-            error!("{img}: backup failed: {e}");
+        let start = now();
+        let result = backup_image(&src, &tgt, &tgt_images, &img);
+        let elapsed = now() - start;
+
+        if let Err(e) = result {
+            error!("{img}: backup failed after {elapsed}: {e}");
             inc_error();
+        } else {
+            info!("{img}: backup ok after {elapsed}");
         }
     });
 
