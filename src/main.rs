@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 
-mod rbd;
+use ceph_backup::rbd;
 
 #[derive(Parser)]
 #[command()]
@@ -15,6 +15,10 @@ struct Cli {
     /// Ceph cluster
     #[arg(short = 'c', long, default_value = "ceph", env = "CEPH_CLUSTER")]
     cluster: String,
+
+    /// Parallelism (for operations supporting it)
+    #[arg(short = 'P', long, default_value = "1")]
+    parallel: u8,
 
     #[command(subcommand)]
     command: Commands,
@@ -57,6 +61,8 @@ fn main() -> eyre::Result<()> {
         .parse_write_style(cli.log_style.as_str())
         .format_timestamp_millis()
         .init();
+
+    ceph_backup::set_parallel(cli.parallel);
 
     match cli.command {
         Commands::Rbd {

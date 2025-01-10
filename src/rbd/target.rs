@@ -136,6 +136,7 @@ fn write_result<T>(mut stream: &TcpStream, result: Result<T>) -> Result<T> {
     result
 }
 
+#[derive(Clone)]
 pub struct Client<'t> {
     remote: &'t str,
     compress_level: i32,
