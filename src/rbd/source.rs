@@ -9,15 +9,13 @@ pub fn run(cluster: &str, pool: &str, dest: &str, compress_level: i32, filter: &
 
     let today = now().date_naive();
 
-    let rbd = super::Local::new(cluster, pool);
+    let src = Arc::new(super::Local::new(cluster, pool));
 
-    let images = rbd.ls()?;
+    let images = src.ls()?;
     let images: Vec<_> = images
         .into_iter()
         .filter(|img| glob_match(filter, img))
         .collect();
-
-    let rbd = Arc::new(rbd);
 
     let error_count = AtomicUsize::new(0);
     let inc_error = || {
@@ -27,13 +25,13 @@ pub fn run(cluster: &str, pool: &str, dest: &str, compress_level: i32, filter: &
     info!("checking snapshots");
     crate::parallel_process(images.clone(), |img| {
         let result = || -> Result<()> {
-            let snapshots = rbd.snap_ls(&img)?;
+            let snapshots = src.snap_ls(&img)?;
             let latest = snapshots.iter().filter_map(|s| s.timestamp().ok()).max();
 
             if latest.is_none_or(|t| t.date() != today) {
                 let snap_name = now().format("bck-%Y%m%d_%H%M%S");
                 info!("{img}: creating today's snapshot: {snap_name}");
-                rbd.snap_create(&img, &snap_name.to_string())?;
+                src.snap_create(&img, &snap_name.to_string())?;
             }
             Ok(())
         }();
@@ -51,10 +49,10 @@ pub fn run(cluster: &str, pool: &str, dest: &str, compress_level: i32, filter: &
     let tgt_images = tgt.ls()?;
 
     crate::parallel_process(images.clone(), |img| {
-        let rbd = rbd.clone();
+        let src = src.clone();
         let tgt = tgt.clone();
 
-        if let Err(e) = backup_image(&rbd, &tgt, &tgt_images, &img) {
+        if let Err(e) = backup_image(&src, &tgt, &tgt_images, &img) {
             error!("{img}: backup failed: {e}");
             inc_error();
         }
@@ -74,12 +72,12 @@ pub fn run(cluster: &str, pool: &str, dest: &str, compress_level: i32, filter: &
 }
 
 fn backup_image(
-    rbd: &super::Local,
+    src: &super::Local,
     tgt: &super::target::Client,
     tgt_images: &Vec<String>,
     img: &String,
 ) -> Result<()> {
-    let mut src_snaps = rbd.snap_ls(img)?;
+    let mut src_snaps = src.snap_ls(img)?;
     src_snaps.sort();
 
     if src_snaps.is_empty() {
@@ -92,7 +90,7 @@ fn backup_image(
 
         info!("{img}: backup is missing, creating from {snap_name}");
 
-        let mut export = rbd.export(&format!("{img}@{snap_name}"))?;
+        let mut export = src.export(&format!("{img}@{snap_name}"))?;
         tgt.import(img, &snap_name, &mut export)?;
     }
 
@@ -114,7 +112,7 @@ fn backup_image(
 
         let snap_name = src_snaps.first().unwrap().name.clone();
 
-        let mut export = rbd.export(&format!("{img}@{snap_name}"))?;
+        let mut export = src.export(&format!("{img}@{snap_name}"))?;
         tgt.import(img, &snap_name, &mut export)?;
 
         from_snap = Some(snap_name);
@@ -134,7 +132,7 @@ fn backup_image(
 
         tgt.snap_rollback(img, &from_snap)?;
 
-        let mut export = rbd.export_diff(img, &from_snap, &to_snap)?;
+        let mut export = src.export_diff(img, &from_snap, &to_snap)?;
         tgt.import_diff(img, &mut export)?;
 
         from_snap = to_snap;
@@ -153,7 +151,7 @@ fn backup_image(
     {
         let snap = &snap.name;
         info!("{img}: removing source snapshot {snap}");
-        rbd.snap_remove(img, snap)?;
+        src.snap_remove(img, snap)?;
     }
 
     Ok(())
