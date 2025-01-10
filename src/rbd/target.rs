@@ -3,6 +3,8 @@ use log::{info, warn};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 
+use crate::rbd;
+
 pub fn run(cluster: &str, pool: &str, bind_addr: &str, expire_days: u16) -> Result<()> {
     let listener = TcpListener::bind(bind_addr)?;
 
@@ -15,7 +17,7 @@ pub fn run(cluster: &str, pool: &str, bind_addr: &str, expire_days: u16) -> Resu
         let pool = pool.to_string();
 
         std::thread::spawn(move || {
-            let rbd = super::Local::new(&cluster, &pool);
+            let rbd = rbd::Local::new(&cluster, &pool);
             if let Err(e) = handle_connection(remote, &stream, rbd, expire_days) {
                 warn!("{remote}: failed: {e}");
             }
@@ -26,7 +28,7 @@ pub fn run(cluster: &str, pool: &str, bind_addr: &str, expire_days: u16) -> Resu
 fn handle_connection(
     remote: SocketAddr,
     mut stream: &TcpStream,
-    rbd: super::Local,
+    rbd: rbd::Local,
     expire_days: u16,
 ) -> Result<()> {
     stream.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
@@ -87,7 +89,7 @@ fn handle_connection(
     Ok(())
 }
 
-fn expire_backups(rbd: super::Local, expire_days: u16) -> Result<()> {
+fn expire_backups(rbd: rbd::Local, expire_days: u16) -> Result<()> {
     let deadline = chrono::Utc::now().naive_utc() - chrono::TimeDelta::days(expire_days as i64);
 
     for img in rbd.ls()? {
@@ -183,7 +185,7 @@ impl<'t> Client<'t> {
         self.dial_json("ls".to_string())
     }
 
-    pub fn snap_ls(&self, img: &str) -> Result<Vec<super::Snapshot>> {
+    pub fn snap_ls(&self, img: &str) -> Result<Vec<rbd::Snapshot>> {
         self.dial_json(format!("snap_ls {img}"))
     }
 

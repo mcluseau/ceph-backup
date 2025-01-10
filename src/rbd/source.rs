@@ -4,12 +4,14 @@ use log::{error, info, warn};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use crate::rbd;
+
 pub fn run(cluster: &str, pool: &str, dest: &str, compress_level: i32, filter: &str) -> Result<()> {
     info!("cluster {cluster}, pool {pool}");
 
     let today = now().date_naive();
 
-    let src = Arc::new(super::Local::new(cluster, pool));
+    let src = Arc::new(rbd::Local::new(cluster, pool));
 
     let images = src.ls()?;
     let images: Vec<_> = images
@@ -42,7 +44,7 @@ pub fn run(cluster: &str, pool: &str, dest: &str, compress_level: i32, filter: &
         }
     });
 
-    let tgt = Arc::new(super::target::Client::new(dest, compress_level));
+    let tgt = Arc::new(rbd::target::Client::new(dest, compress_level));
 
     info!("checking remote snapshots");
 
@@ -78,8 +80,8 @@ pub fn run(cluster: &str, pool: &str, dest: &str, compress_level: i32, filter: &
 }
 
 fn backup_image(
-    src: &super::Local,
-    tgt: &super::target::Client,
+    src: &rbd::Local,
+    tgt: &rbd::target::Client,
     tgt_images: &Vec<String>,
     img: &String,
 ) -> Result<()> {
