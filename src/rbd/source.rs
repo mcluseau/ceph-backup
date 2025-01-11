@@ -56,7 +56,7 @@ pub fn run(cluster: &str, pool: &str, dest: &str, compress_level: i32, filter: &
 
         let start = now();
         let result = backup_image(&src, &tgt, &tgt_images, &img);
-        let elapsed = now() - start;
+        let elapsed = format_duration(now() - start);
 
         if let Err(e) = result {
             error!("{img}: backup failed after {elapsed}: {e}");
@@ -76,6 +76,27 @@ pub fn run(cluster: &str, pool: &str, dest: &str, compress_level: i32, filter: &
     } else {
         info!("backups done");
         Ok(())
+    }
+}
+
+fn format_duration(td: chrono::TimeDelta) -> String {
+    let ms = td.num_milliseconds();
+    let (s, ms) = (ms / 1000, ms % 1000);
+    let (m, s) = (s / 60, s % 60);
+    let (h, m) = (m / 60, m % 60);
+    let (d, h) = (h / 24, h % 24);
+    let (w, d) = (d / 7, d % 7);
+
+    if w != 0 {
+        format!("{w}w{d}d{h}h{m}m{s}.{ms:0>3}s")
+    } else if d != 0 {
+        format!("{d}d{h}h{m}m{s}.{ms:0>3}s")
+    } else if h != 0 {
+        format!("{h}h{m}m{s}.{ms:0>3}s")
+    } else if m != 0 {
+        format!("{m}m{s}.{ms:0>3}s")
+    } else {
+        format!("{s}.{ms:0>3}s")
     }
 }
 
