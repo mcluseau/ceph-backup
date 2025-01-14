@@ -213,6 +213,30 @@ impl<'t> Local<'t> {
         self.run(&["image-meta", "remove", img, key])
     }
 
+    pub fn meta_sync(&self, img: &str, kvs: &Map<String, String>) -> Result<()> {
+        let current = self.meta_list(img)?;
+
+        for (k, v) in kvs {
+            if k.starts_with("bck-") {
+                continue; // bck- prefix is reserved
+            }
+            if current.get(k) != Some(v) {
+                self.meta_set(img, k, v)?;
+            }
+        }
+
+        for k in current.keys() {
+            if k.starts_with("bck-") {
+                continue; // bck- prefix is reserved
+            }
+            if kvs.get(k).is_none() {
+                self.meta_rm(img, k)?;
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn import_diff(&self, img: &str, input: &mut impl std::io::Read) -> Result<()> {
         let mut rollback_snap = self.snap_ls(img)?;
         rollback_snap.sort();

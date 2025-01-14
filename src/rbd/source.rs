@@ -181,6 +181,8 @@ fn backup_image(
         src.snap_remove(img, snap)?;
     }
 
+    tgt.meta_sync(img, &src.meta_list(img)?)?;
+
     Ok(())
 }
 

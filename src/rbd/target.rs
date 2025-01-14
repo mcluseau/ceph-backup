@@ -1,5 +1,6 @@
 use eyre::{format_err, Result};
 use log::{info, warn};
+use std::collections::BTreeMap as Map;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 
@@ -74,6 +75,17 @@ fn handle_connection(
         }
         "expire" => {
             write_result(stream, expire_backups(rbd, expire_days))?;
+        }
+        "meta_sync" => {
+            let img = split.next().ok_or(format_err!("no image"))?;
+
+            let mut kvs = Map::new();
+            for kv in split {
+                let (k, v) = kv.split_once('=').unwrap_or_else(|| (kv, ""));
+                kvs.insert(k.to_string(), v.to_string());
+            }
+
+            write_result(stream, rbd.meta_sync(img, &kvs))?;
         }
         _ => {
             stream.write(b"ERR\n")?;
@@ -204,6 +216,19 @@ impl<'t> Client<'t> {
 
         stream.shutdown(std::net::Shutdown::Write)?;
         self.result(&stream)
+    }
+
+    pub fn meta_sync(&self, img: &str, kvs: &Map<String, String>) -> Result<()> {
+        let mut command = String::from("meta_sync ");
+        command.push_str(img);
+        for (k, v) in kvs {
+            command.push(' ');
+            command.push_str(k);
+            command.push('=');
+            command.push_str(v);
+        }
+
+        self.dial_noout(command)
     }
 
     pub fn expire(&self) -> Result<()> {
