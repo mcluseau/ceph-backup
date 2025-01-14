@@ -245,26 +245,32 @@ impl<'t> Local<'t> {
         Ok(())
     }
 
-    pub fn import_diff(&self, img: &str, input: &mut impl std::io::Read) -> Result<()> {
+    pub fn prepare_import_diff(&self, img: &str) -> Result<()> {
         let mut rollback_snap = self.snap_ls(img)?;
         rollback_snap.sort();
         let rollback_snap = rollback_snap.last().map(|s| &s.name).unwrap(); // assume a snapshot exists
 
         match self.meta_get(img, KEY_PARTIAL)? {
-            Some(true) => {
-                // partial import detected, rollback to snapshot
+            // partial import detected, rollback to snapshot
+            // if no partial import info, assume it is partial too
+            None | Some(true) => {
                 self.snap_rollback(img, rollback_snap)?;
+                self.meta_set(img, KEY_PARTIAL, &false)
             }
-            Some(false) => {
-                // no partial import, say we start
-                self.meta_set(img, KEY_PARTIAL, &true)?;
-            }
-            None => {
-                // no partial import info, assume it is
-                self.meta_set(img, KEY_PARTIAL, &true)?;
-                self.snap_rollback(img, rollback_snap)?;
-            }
+
+            // no partial import
+            Some(false) => Ok(()),
         }
+    }
+
+    pub fn import_diff(&self, img: &str, input: &mut impl std::io::Read) -> Result<()> {
+        if self.meta_get(img, KEY_PARTIAL)?.unwrap_or(true) {
+            return Err(format_err!(
+                "image may have a partial import, prepare for import first"
+            ));
+        }
+
+        self.meta_set(img, KEY_PARTIAL, &true)?;
 
         let (cmd, args) = self.rbd_cmd(vec![
             "--pool",
@@ -280,34 +286,24 @@ impl<'t> Local<'t> {
             .stdin(std::process::Stdio::piped())
             .spawn()?;
 
-        let result = || -> Result<()> {
-            let stdin = rbd_import.stdin.as_mut().unwrap();
+        let stdin = rbd_import.stdin.as_mut().unwrap();
 
-            let copy_result =
-                std::io::copy(input, stdin).map_err(|e| format_err!("copy failed: {e}"));
+        let copy_result = std::io::copy(input, stdin).map_err(|e| format_err!("copy failed: {e}"));
 
-            let status = rbd_import
-                .wait()
-                .map_err(|e| format_err!("rbd import-diff failed: {e}"))?;
+        let status = rbd_import
+            .wait()
+            .map_err(|e| format_err!("rbd import-diff failed: {e}"))?;
 
-            copy_result?;
+        copy_result?;
 
-            if !status.success() {
-                return Err(eyre::format_err!(
-                    "rbd import-diff failed: status code: {:?}",
-                    status.code()
-                ));
-            }
-
-            self.meta_set(img, KEY_PARTIAL, &false)
-        }();
-
-        if result.is_err() {
-            if let Err(e) = self.snap_rollback(img, rollback_snap) {
-                error!("failed to rollback to {img}@{rollback_snap}: {e}");
-            }
+        if !status.success() {
+            return Err(eyre::format_err!(
+                "rbd import-diff failed: status code: {:?}",
+                status.code()
+            ));
         }
-        result
+
+        self.meta_set(img, KEY_PARTIAL, &false)
     }
 }
 

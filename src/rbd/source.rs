@@ -155,6 +155,11 @@ fn backup_image(
         .skip(1)
         .collect();
 
+    if !src_snaps_to_send.is_empty() {
+        info!("{img}: preparing for diff import");
+        tgt.prepare_import_diff(img)?;
+    }
+
     for to_snap in src_snaps_to_send {
         let to_snap = to_snap.name.clone();
         info!("{img}: sending diff {from_snap} -> {to_snap}");

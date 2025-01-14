@@ -67,6 +67,10 @@ fn handle_connection(
             let mut zstd_in = zstd::Decoder::new(reader)?;
             write_result(stream, rbd.import(img, snap_name, &mut zstd_in))?;
         }
+        "prepare_import_diff" => {
+            let img = split.next().ok_or(format_err!("no image"))?;
+            write_result(stream, rbd.prepare_import_diff(img))?;
+        }
         "import_diff" => {
             let img = split.next().ok_or(format_err!("no image"))?;
 
@@ -207,6 +211,10 @@ impl<'t> Client<'t> {
 
         stream.shutdown(std::net::Shutdown::Write)?;
         self.result(&stream)
+    }
+
+    pub fn prepare_import_diff(&self, img: &str) -> Result<()> {
+        self.dial_noout(format!("prepare_import_diff {img}"))
     }
 
     pub fn import_diff(&self, img: &str, mut reader: impl Read) -> Result<()> {
