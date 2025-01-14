@@ -3,8 +3,10 @@ pub mod target;
 
 use chrono::NaiveDateTime;
 use eyre::{format_err, Result};
-use log::error;
+use log::{error, warn};
 use std::collections::BTreeMap as Map;
+
+const KEY_PARTIAL: &str = "bck-partial";
 
 #[derive(Clone)]
 pub struct Local<'t> {
@@ -177,10 +179,16 @@ impl<'t> Local<'t> {
 
         if result.is_err() {
             if let Err(e) = self.remove(img) {
-                error!("failed to remove {img}: {e}");
+                error!("{img}: failed to remove: {e}");
             }
+            return result;
         }
-        result
+
+        if let Err(e) = self.meta_set(img, KEY_PARTIAL, &false) {
+            warn!("{img}: failed to set image-meta: {e}");
+        }
+
+        Ok(())
     }
 
     pub fn meta_list(&self, img: &str) -> Result<Map<String, String>> {
@@ -242,7 +250,6 @@ impl<'t> Local<'t> {
         rollback_snap.sort();
         let rollback_snap = rollback_snap.last().map(|s| &s.name).unwrap(); // assume a snapshot exists
 
-        const KEY_PARTIAL: &str = "bck-partial";
         match self.meta_get(img, KEY_PARTIAL)? {
             Some(true) => {
                 // partial import detected, rollback to snapshot
