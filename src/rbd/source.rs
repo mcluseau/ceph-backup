@@ -159,8 +159,6 @@ fn backup_image(
         let to_snap = to_snap.name.clone();
         info!("{img}: sending diff {from_snap} -> {to_snap}");
 
-        tgt.snap_rollback(img, &from_snap)?;
-
         let mut export = src.export_diff(img, &from_snap, &to_snap)?;
         tgt.import_diff(img, &mut export)?;
 

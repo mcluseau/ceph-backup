@@ -59,11 +59,6 @@ fn handle_connection(
             let img = split.next().ok_or(format_err!("no image"))?;
             write_result(stream, rbd.trash_move(img))?;
         }
-        "snap_rollback" => {
-            let img = split.next().ok_or(format_err!("no image"))?;
-            let snap_name = split.next().ok_or(format_err!("no snapshot name"))?;
-            write_result(stream, rbd.snap_rollback(img, snap_name))?;
-        }
         "import" => {
             let img = split.next().ok_or(format_err!("no image"))?;
             let snap_name = split.next().ok_or(format_err!("no snapshot name"))?;
@@ -187,10 +182,6 @@ impl<'t> Client<'t> {
 
     pub fn snap_ls(&self, img: &str) -> Result<Vec<rbd::Snapshot>> {
         self.dial_json(format!("snap_ls {img}"))
-    }
-
-    pub fn snap_rollback(&self, img: &str, snap_name: &str) -> Result<()> {
-        self.dial_noout(format!("snap_rollback {img} {snap_name}"))
     }
 
     pub fn trash_move(&self, img: &str) -> Result<()> {
