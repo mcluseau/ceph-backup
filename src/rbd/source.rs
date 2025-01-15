@@ -2,80 +2,269 @@ use eyre::{format_err, Result};
 use glob_match::glob_match;
 use log::{error, info, warn};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
 
 use crate::rbd;
 
 pub fn run(cluster: &str, pool: &str, dest: &str, compress_level: i32, filter: &str) -> Result<()> {
     info!("cluster {cluster}, pool {pool}");
 
-    let today = now().date_naive();
+    let src = rbd::Local::new(cluster, pool);
+    let tgt = rbd::target::Client::new(dest, compress_level);
 
-    let src = Arc::new(rbd::Local::new(cluster, pool));
+    BackupRun::new(src, tgt).run(filter)
+}
 
-    let images = src.ls()?;
-    let images: Vec<_> = images
-        .into_iter()
-        .filter(|img| glob_match(filter, img))
-        .collect();
+struct BackupRun<'t> {
+    src: rbd::Local<'t>,
+    tgt: rbd::target::Client<'t>,
+    error_count: AtomicUsize,
+    stage: &'static str,
+}
+impl<'t> BackupRun<'t> {
+    fn new(src: rbd::Local<'t>, tgt: rbd::target::Client<'t>) -> Self {
+        Self {
+            src,
+            tgt,
+            error_count: AtomicUsize::new(0),
+            stage: "init",
+        }
+    }
 
-    let error_count = AtomicUsize::new(0);
-    let inc_error = || {
-        error_count.fetch_add(1, Ordering::SeqCst);
-    };
+    fn run(&mut self, filter: &str) -> Result<()> {
+        let today = now().date_naive();
 
-    info!("checking snapshots");
-    crate::parallel_process(images.clone(), |img| {
-        let result = || -> Result<()> {
-            let snapshots = src.snap_ls(&img)?;
+        let images = self.src.ls()?;
+        let images: Vec<_> = images
+            .into_iter()
+            .filter(|img| glob_match(filter, img))
+            .collect();
+
+        // --------------------------------------------------------------
+        self.stage("creating snapshots");
+        let mut images = self.steps(images, |img| -> Result<()> {
+            let snapshots = self.src.snap_ls(img)?;
             let latest = snapshots.iter().filter_map(|s| s.timestamp().ok()).max();
 
             if latest.is_none_or(|t| t.date() != today) {
                 let snap_name = now().format("bck-%Y%m%d_%H%M%S");
                 info!("{img}: creating today's snapshot: {snap_name}");
-                src.snap_create(&img, &snap_name.to_string())?;
+                self.src.snap_create(img, &snap_name.to_string())?;
             }
             Ok(())
-        }();
+        });
 
-        if let Err(e) = result {
-            error!("{img}: snapshot failed: {e}");
-            inc_error();
+        // --------------------------------------------------------------
+        self.stage("creating missing backups");
+
+        let tgt_images = self.tgt.ls()?;
+
+        // TODO when extract_if move out of nightly: let missing_backups = images.extract_if(|i| !tgt_images.contains(&i));
+        let mut missing_backups = Vec::new();
+        images.retain(|i| {
+            if tgt_images.contains(&i) {
+                true
+            } else {
+                missing_backups.push(i.clone());
+                false
+            }
+        });
+
+        let created_backups = self.chrono_steps(missing_backups, |img| -> Result<()> {
+            let mut src_snaps = self.src.snap_ls(img)?;
+            src_snaps.sort();
+
+            let Some(src_snap) = src_snaps.first() else {
+                return Err(format_err!("no snapshots found"));
+            };
+
+            let snap_name = src_snap.name.as_str();
+
+            info!("{img}: backup is missing, creating from {snap_name}");
+
+            let mut export = self.src.export(&format!("{img}@{snap_name}"))?;
+            self.tgt.import(img, &snap_name, &mut export)
+        });
+
+        images.extend(created_backups);
+        images.sort();
+
+        // --------------------------------------------------------------
+        self.stage("backup snapshots");
+        self.chrono_steps(images, |img| -> Result<()> { self.backup_snapshots(img) });
+
+        // --------------------------------------------------------------
+        info!("expiring remote backups");
+        if let Err(e) = self.tgt.expire() {
+            error!("expiration failed: {e}");
+            self.error();
         }
-    });
 
-    let tgt = Arc::new(rbd::target::Client::new(dest, compress_level));
+        // --------------------------------------------------------------
+        let error_count = self.error_count();
+        if error_count == 0 {
+            info!("backups done without errors");
+            Ok(())
+        } else {
+            warn!("backups done with {error_count} errors");
+            Err(format_err!("{error_count} errors"))
+        }
+    }
 
-    info!("checking remote snapshots");
+    fn backup_snapshots(&self, img: &str) -> Result<()> {
+        let mut src_snaps = self.src.snap_ls(img)?;
+        src_snaps.sort();
 
-    let tgt_images = tgt.ls()?;
+        if src_snaps.is_empty() {
+            warn!("{img}: no snapshots found");
+            return Ok(());
+        }
 
-    crate::parallel_process(images.clone(), |img| {
-        let src = src.clone();
-        let tgt = tgt.clone();
+        let mut tgt_snaps = self.tgt.snap_ls(img)?;
+
+        tgt_snaps.sort();
+        let mut from_snap = tgt_snaps.last().map(|s| s.name.to_string());
+
+        if !src_snaps.iter().any(|s| Some(s.name.clone()) == from_snap) {
+            if let Some(from_snap) = from_snap {
+                // latest snapshot on target is not on source anymore
+                warn!("{img}: cannot resume snapshots from {from_snap} as is does not exists on source anymore, recreating");
+            } else {
+                // no snapshots on target
+                warn!("{img}: no snapshots on target, recreating");
+            }
+
+            self.tgt.trash_move(img)?;
+
+            let snap_name = src_snaps.first().unwrap().name.clone();
+
+            let mut export = self.src.export(&format!("{img}@{snap_name}"))?;
+            self.tgt.import(img, &snap_name, &mut export)?;
+
+            from_snap = Some(snap_name);
+        }
+
+        let mut from_snap = from_snap.unwrap();
+
+        let src_snaps_to_send: Vec<_> = src_snaps
+            .iter()
+            .skip_while(|s| s.name != from_snap)
+            .skip(1)
+            .collect();
+
+        if !src_snaps_to_send.is_empty() {
+            info!("{img}: preparing for diff import");
+            self.tgt.prepare_import_diff(img)?;
+        }
+
+        for to_snap in src_snaps_to_send {
+            let to_snap = to_snap.name.clone();
+            info!("{img}: sending diff {from_snap} -> {to_snap}");
+
+            let mut export = self.src.export_diff(img, &from_snap, &to_snap)?;
+            self.tgt.import_diff(img, &mut export)?;
+
+            from_snap = to_snap;
+        }
+
+        let mut tgt_snaps = self.tgt.snap_ls(img)?;
+        tgt_snaps.sort();
+        let tgt_snaps: Vec<_> = tgt_snaps
+            .iter()
+            .take_while(|s| s.name != from_snap)
+            .collect();
+
+        for snap in src_snaps
+            .iter()
+            .filter(|s| tgt_snaps.iter().any(|ts| ts.name == s.name))
+        {
+            let snap = &snap.name;
+            info!("{img}: removing source snapshot {snap}");
+            self.src.snap_remove(img, snap)?;
+        }
+
+        self.tgt.meta_sync(img, &self.src.meta_list(img)?)?;
+
+        Ok(())
+    }
+
+    fn steps<F: Fn(&str) -> Result<()> + Send + Sync + Copy>(
+        &self,
+        steps: Vec<String>,
+        action: F,
+    ) -> Vec<String> {
+        crate::parallel_process(steps, |step| {
+            if self.step(&step, action) {
+                Some(step)
+            } else {
+                None
+            }
+        })
+        .into_iter()
+        .filter_map(|s| s)
+        .collect()
+    }
+
+    /// process given steps, returning successful ones.
+    fn chrono_steps<F: FnMut(&str) -> Result<()> + Send + Sync + Copy>(
+        &self,
+        steps: Vec<String>,
+        action: F,
+    ) -> Vec<String> {
+        crate::parallel_process(steps, |step| -> Option<String> {
+            if self.chrono_step(&step, action) {
+                Some(step)
+            } else {
+                None
+            }
+        })
+        .into_iter()
+        .filter_map(|s| s)
+        .collect()
+    }
+
+    fn stage(&mut self, stage: &'static str) {
+        info!("{stage}");
+        self.stage = stage;
+    }
+
+    fn error(&self) {
+        self.error_count.fetch_add(1, Ordering::SeqCst);
+    }
+    fn error_count(&self) -> usize {
+        self.error_count.load(Ordering::Relaxed)
+    }
+
+    fn step<F>(&self, img: &str, action: F) -> bool
+    where
+        F: Fn(&str) -> Result<()>,
+    {
+        let stage = self.stage;
+        if let Err(e) = action(img) {
+            error!("{stage}: {img}: failed: {e}");
+            self.error();
+            false
+        } else {
+            true
+        }
+    }
+    fn chrono_step<F>(&self, img: &str, mut action: F) -> bool
+    where
+        F: FnMut(&str) -> Result<()>,
+    {
+        let stage = self.stage;
 
         let start = now();
-        let result = backup_image(&src, &tgt, &tgt_images, &img);
+        let result = action(img);
         let elapsed = format_duration(now() - start);
 
         if let Err(e) = result {
-            error!("{img}: backup failed after {elapsed}: {e}");
-            inc_error();
+            error!("{stage}: {img}: failed after {elapsed}: {e}");
+            self.error();
+            false
         } else {
-            info!("{img}: backup ok after {elapsed}");
+            info!("{stage}: {img}: ok after {elapsed}");
+            true
         }
-    });
-
-    info!("expiring remote backups");
-    tgt.expire()?;
-
-    let error_count = error_count.load(Ordering::Relaxed);
-    if error_count != 0 {
-        warn!("backups done with {error_count} errors");
-        Err(format_err!("{error_count} errors"))
-    } else {
-        info!("backups done");
-        Ok(())
     }
 }
 
@@ -98,97 +287,6 @@ fn format_duration(td: chrono::TimeDelta) -> String {
     } else {
         format!("{s}.{ms:0>3}s")
     }
-}
-
-fn backup_image(
-    src: &rbd::Local,
-    tgt: &rbd::target::Client,
-    tgt_images: &Vec<String>,
-    img: &String,
-) -> Result<()> {
-    let mut src_snaps = src.snap_ls(img)?;
-    src_snaps.sort();
-
-    if src_snaps.is_empty() {
-        warn!("{img}: no snapshots found");
-        return Ok(());
-    }
-
-    if !tgt_images.contains(img) {
-        let snap_name = src_snaps.first().map(|s| s.name.as_str()).unwrap();
-
-        info!("{img}: backup is missing, creating from {snap_name}");
-
-        let mut export = src.export(&format!("{img}@{snap_name}"))?;
-        tgt.import(img, &snap_name, &mut export)?;
-    }
-
-    let mut tgt_snaps = tgt.snap_ls(img)?;
-
-    tgt_snaps.sort();
-    let mut from_snap = tgt_snaps.last().map(|s| s.name.to_string());
-
-    if !src_snaps.iter().any(|s| Some(s.name.clone()) == from_snap) {
-        if let Some(from_snap) = from_snap {
-            // latest snapshot on target is not on source anymore
-            warn!("{img}: cannot resume snapshots from {from_snap} as is does not exists on source anymore, recreating");
-        } else {
-            // no snapshots on target
-            warn!("{img}: no snapshots on target, recreating");
-        }
-
-        tgt.trash_move(img)?;
-
-        let snap_name = src_snaps.first().unwrap().name.clone();
-
-        let mut export = src.export(&format!("{img}@{snap_name}"))?;
-        tgt.import(img, &snap_name, &mut export)?;
-
-        from_snap = Some(snap_name);
-    }
-
-    let mut from_snap = from_snap.unwrap();
-
-    let src_snaps_to_send: Vec<_> = src_snaps
-        .iter()
-        .skip_while(|s| s.name != from_snap)
-        .skip(1)
-        .collect();
-
-    if !src_snaps_to_send.is_empty() {
-        info!("{img}: preparing for diff import");
-        tgt.prepare_import_diff(img)?;
-    }
-
-    for to_snap in src_snaps_to_send {
-        let to_snap = to_snap.name.clone();
-        info!("{img}: sending diff {from_snap} -> {to_snap}");
-
-        let mut export = src.export_diff(img, &from_snap, &to_snap)?;
-        tgt.import_diff(img, &mut export)?;
-
-        from_snap = to_snap;
-    }
-
-    let mut tgt_snaps = tgt.snap_ls(img)?;
-    tgt_snaps.sort();
-    let tgt_snaps: Vec<_> = tgt_snaps
-        .iter()
-        .take_while(|s| s.name != from_snap)
-        .collect();
-
-    for snap in src_snaps
-        .iter()
-        .filter(|s| tgt_snaps.iter().any(|ts| ts.name == s.name))
-    {
-        let snap = &snap.name;
-        info!("{img}: removing source snapshot {snap}");
-        src.snap_remove(img, snap)?;
-    }
-
-    tgt.meta_sync(img, &src.meta_list(img)?)?;
-
-    Ok(())
 }
 
 fn now() -> chrono::DateTime<chrono::Utc> {
