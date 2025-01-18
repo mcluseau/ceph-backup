@@ -41,7 +41,7 @@ impl<'t> BackupRun<'t> {
 
         // --------------------------------------------------------------
         self.stage("creating snapshots");
-        let mut images = self.steps(images, |img| -> Result<()> {
+        let results = self.steps(images, |img| -> Result<()> {
             let snapshots = self.src.snap_ls(img)?;
             let latest = snapshots.iter().filter_map(|s| s.timestamp().ok()).max();
 
@@ -58,18 +58,18 @@ impl<'t> BackupRun<'t> {
 
         let tgt_images = self.tgt.ls()?;
 
-        // TODO when extract_if move out of nightly: let missing_backups = images.extract_if(|i| !tgt_images.contains(&i));
+        // dispatch existing and missing backups
         let mut missing_backups = Vec::new();
-        images.retain(|i| {
-            if tgt_images.contains(&i) {
-                true
+        let mut images = Vec::with_capacity(results.len());
+        for img in results.all_ok() {
+            if tgt_images.contains(&img) {
+                images.push(img);
             } else {
-                missing_backups.push(i.clone());
-                false
+                missing_backups.push(img);
             }
-        });
+        }
 
-        let created_backups = self.chrono_steps(missing_backups, |img| -> Result<()> {
+        let results = self.chrono_steps(missing_backups, |img| -> Result<()> {
             let mut src_snaps = self.src.snap_ls(img)?;
             src_snaps.sort();
 
@@ -85,19 +85,27 @@ impl<'t> BackupRun<'t> {
             self.tgt.import(img, &snap_name, &mut export)
         });
 
-        images.extend(created_backups);
+        // reintroduce successfully created backups
+        images.extend(results.all_ok());
         images.sort();
 
         // --------------------------------------------------------------
         self.stage("backup snapshots");
-        self.chrono_steps(images, |img| -> Result<()> { self.backup_snapshots(img) });
+        let results = self.chrono_steps(images, |img| -> Result<()> { self.backup_snapshots(img) });
+        let maybe_partials = results.all_err().collect();
 
         // --------------------------------------------------------------
-        info!("expiring remote backups");
+        self.stage("expiring remote backups");
         if let Err(e) = self.tgt.expire() {
             error!("expiration failed: {e}");
             self.error();
         }
+
+        // --------------------------------------------------------------
+        self.stage("rollback partials diffs");
+        self.chrono_steps(maybe_partials, |img| -> Result<()> {
+            self.tgt.prepare_import_diff(img)
+        });
 
         // --------------------------------------------------------------
         let error_count = self.error_count();
@@ -120,11 +128,11 @@ impl<'t> BackupRun<'t> {
         }
 
         let mut tgt_snaps = self.tgt.snap_ls(img)?;
-
         tgt_snaps.sort();
-        let mut from_snap = tgt_snaps.last().map(|s| s.name.to_string());
+        let from_snap = tgt_snaps.into_iter().rev().next();
+        let mut from_snap = from_snap.map(|s| s.name);
 
-        if !src_snaps.iter().any(|s| Some(s.name.clone()) == from_snap) {
+        if !(src_snaps.iter()).any(|s| Some(&s.name) == from_snap.as_ref()) {
             if let Some(from_snap) = from_snap {
                 // latest snapshot on target is not on source anymore
                 warn!("{img}: cannot resume snapshots from {from_snap} as is does not exists on source anymore, recreating");
@@ -145,8 +153,7 @@ impl<'t> BackupRun<'t> {
 
         let mut from_snap = from_snap.unwrap();
 
-        let src_snaps_to_send: Vec<_> = src_snaps
-            .iter()
+        let src_snaps_to_send: Vec<_> = (src_snaps.iter())
             .skip_while(|s| s.name != from_snap)
             .skip(1)
             .collect();
@@ -168,15 +175,11 @@ impl<'t> BackupRun<'t> {
 
         let mut tgt_snaps = self.tgt.snap_ls(img)?;
         tgt_snaps.sort();
-        let tgt_snaps: Vec<_> = tgt_snaps
-            .iter()
+        let tgt_snaps: Vec<_> = (tgt_snaps.iter())
             .take_while(|s| s.name != from_snap)
             .collect();
 
-        for snap in src_snaps
-            .iter()
-            .filter(|s| tgt_snaps.iter().any(|ts| ts.name == s.name))
-        {
+        for snap in (src_snaps.iter()).filter(|s| tgt_snaps.iter().any(|ts| ts.name == s.name)) {
             let snap = &snap.name;
             info!("{img}: removing source snapshot {snap}");
             self.src.snap_remove(img, snap)?;
@@ -191,17 +194,11 @@ impl<'t> BackupRun<'t> {
         &self,
         steps: Vec<String>,
         action: F,
-    ) -> Vec<String> {
+    ) -> Vec<(String, bool)> {
         crate::parallel_process(steps, |step| {
-            if self.step(&step, action) {
-                Some(step)
-            } else {
-                None
-            }
+            let ok = self.step(&step, action);
+            (step, ok)
         })
-        .into_iter()
-        .filter_map(|s| s)
-        .collect()
     }
 
     /// process given steps, returning successful ones.
@@ -209,17 +206,11 @@ impl<'t> BackupRun<'t> {
         &self,
         steps: Vec<String>,
         action: F,
-    ) -> Vec<String> {
-        crate::parallel_process(steps, |step| -> Option<String> {
-            if self.chrono_step(&step, action) {
-                Some(step)
-            } else {
-                None
-            }
+    ) -> Vec<(String, bool)> {
+        crate::parallel_process(steps, |step| -> (String, bool) {
+            let ok = self.chrono_step(&step, action);
+            (step, ok)
         })
-        .into_iter()
-        .filter_map(|s| s)
-        .collect()
     }
 
     fn stage(&mut self, stage: &'static str) {
@@ -291,4 +282,18 @@ fn format_duration(td: chrono::TimeDelta) -> String {
 
 fn now() -> chrono::DateTime<chrono::Utc> {
     chrono::Utc::now()
+}
+
+trait StepResults {
+    fn all_ok(self) -> impl Iterator<Item = String>;
+    fn all_err(self) -> impl Iterator<Item = String>;
+}
+impl StepResults for Vec<(String, bool)> {
+    fn all_ok(self) -> impl Iterator<Item = String> {
+        self.into_iter().filter_map(|(img, ok)| ok.then_some(img))
+    }
+    fn all_err(self) -> impl Iterator<Item = String> {
+        self.into_iter()
+            .filter_map(|(img, ok)| (!ok).then_some(img))
+    }
 }
