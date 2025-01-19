@@ -27,6 +27,8 @@ pub fn run(cluster: &str, pool: &str, bind_addr: &str, expire_days: u16) -> Resu
         }
     });
 
+    let rbd = rbd::Local::new(cluster, pool);
+
     thread::scope(|scope| loop {
         let (stream, remote) = loop {
             if crate::terminated() {
@@ -44,11 +46,9 @@ pub fn run(cluster: &str, pool: &str, bind_addr: &str, expire_days: u16) -> Resu
             };
         };
 
-        let cluster = cluster.to_string();
-        let pool = pool.to_string();
+        let rbd = &rbd;
 
         scope.spawn(move || {
-            let rbd = rbd::Local::new(&cluster, &pool);
             if let Err(e) = handle_connection(remote, &stream, rbd, expire_days) {
                 warn!("{remote}: failed: {e}");
             }
@@ -59,7 +59,7 @@ pub fn run(cluster: &str, pool: &str, bind_addr: &str, expire_days: u16) -> Resu
 fn handle_connection(
     remote: SocketAddr,
     mut stream: &TcpStream,
-    rbd: rbd::Local,
+    rbd: &rbd::Local,
     expire_days: u16,
 ) -> Result<()> {
     stream.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
@@ -130,7 +130,7 @@ fn handle_connection(
     Ok(())
 }
 
-fn expire_backups(rbd: rbd::Local, expire_days: u16) -> Result<()> {
+fn expire_backups(rbd: &rbd::Local, expire_days: u16) -> Result<()> {
     let deadline = chrono::Utc::now().naive_utc() - chrono::TimeDelta::days(expire_days as i64);
 
     for img in rbd.ls()? {
