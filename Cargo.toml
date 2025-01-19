@@ -11,6 +11,7 @@ lto = true
 chrono = "0.4.39"
 clap = { version = "4.5.23", features = ["derive", "env"] }
 crossbeam-channel = "0.5.14"
+ctrlc = { version = "3.4.5", features = ["termination"] }
 duct = "0.13.7"
 env_logger = "0.11.6"
 eyre = "0.6.12"

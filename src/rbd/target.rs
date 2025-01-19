@@ -1,29 +1,59 @@
 use eyre::{format_err, Result};
 use log::{info, warn};
-use std::collections::BTreeMap as Map;
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::time::Duration;
+use std::{
+    collections::BTreeMap as Map,
+    io::{BufRead, BufReader, Read, Write},
+    net::{SocketAddr, TcpListener, TcpStream},
+    thread,
+};
 
 use crate::rbd;
 
 pub fn run(cluster: &str, pool: &str, bind_addr: &str, expire_days: u16) -> Result<()> {
     let listener = TcpListener::bind(bind_addr)?;
-
     info!("listening on {bind_addr}");
 
-    loop {
-        let (stream, remote) = listener.accept()?;
+    let (tx, rx) = crossbeam_channel::bounded(0);
+
+    thread::spawn(move || loop {
+        let r = listener.accept();
+        let exit = r.is_ok();
+        if tx.send(r).is_err() {
+            break;
+        }
+        if exit {
+            break;
+        }
+    });
+
+    thread::scope(|scope| loop {
+        let (stream, remote) = loop {
+            if crate::terminated() {
+                return Err(format_err!("terminated"));
+            }
+            use crossbeam_channel::RecvTimeoutError::*;
+            break match rx.recv_timeout(Duration::from_secs(1)) {
+                Ok(e) => e?,
+                Err(Timeout) => {
+                    continue;
+                }
+                Err(Disconnected) => {
+                    return Err(format_err!("recv disconnected"));
+                }
+            };
+        };
 
         let cluster = cluster.to_string();
         let pool = pool.to_string();
 
-        std::thread::spawn(move || {
+        scope.spawn(move || {
             let rbd = rbd::Local::new(&cluster, &pool);
             if let Err(e) = handle_connection(remote, &stream, rbd, expire_days) {
                 warn!("{remote}: failed: {e}");
             }
         });
-    }
+    })
 }
 
 fn handle_connection(

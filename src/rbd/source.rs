@@ -202,7 +202,7 @@ impl<'t> BackupRun<'t> {
     }
 
     /// process given steps, returning successful ones.
-    fn chrono_steps<F: FnMut(&str) -> Result<()> + Send + Sync + Copy>(
+    fn chrono_steps<F: Fn(&str) -> Result<()> + Send + Sync + Copy>(
         &self,
         steps: Vec<String>,
         action: F,
@@ -238,9 +238,9 @@ impl<'t> BackupRun<'t> {
             true
         }
     }
-    fn chrono_step<F>(&self, img: &str, mut action: F) -> bool
+    fn chrono_step<F>(&self, img: &str, action: F) -> bool
     where
-        F: FnMut(&str) -> Result<()>,
+        F: Fn(&str) -> Result<()>,
     {
         let stage = self.stage;
 

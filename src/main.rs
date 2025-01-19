@@ -64,6 +64,14 @@ fn main() -> eyre::Result<()> {
 
     ceph_backup::set_parallel(cli.parallel);
 
+    ctrlc::set_handler(|| {
+        if ceph_backup::terminated() {
+            eprintln!("already got termination signal, exiting immediately");
+            std::process::exit(1);
+        }
+        ceph_backup::sigterm();
+    })?;
+
     match cli.command {
         Commands::Rbd {
             pool,
