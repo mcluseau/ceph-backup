@@ -2,7 +2,6 @@ pub mod rbd;
 
 use log::info;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering::Relaxed as Ordering};
-use std::sync::Arc;
 use std::time::Duration;
 
 const PARALLEL: AtomicU8 = AtomicU8::new(1);
@@ -34,10 +33,8 @@ where
 {
     let parallel = get_parallel();
 
-    let (result_sender, result_receiver) = crossbeam_channel::bounded(0);
+    let (result_tx, result_rx) = crossbeam_channel::bounded(0);
     let (input_tx, input_rx) = crossbeam_channel::bounded(0);
-
-    let process = Arc::new(process);
 
     let mut results: Vec<_> = std::thread::scope(|scope| {
         scope.spawn(move || {
@@ -62,19 +59,22 @@ where
         });
 
         for idx in 0..parallel {
-            info!("starting thread {idx}");
-            let input_receiver = input_rx.clone();
-            let result_sender = result_sender.clone();
-            let process = process.clone();
+            if parallel > 1 {
+                info!("starting thread {idx}");
+            }
+            let input_rx = input_rx.clone();
+            let result_tx = result_tx.clone();
+            let process = &process;
             scope.spawn(move || {
-                for (idx, input) in input_receiver.into_iter() {
+                for (idx, input) in input_rx.into_iter() {
                     let result = process(input);
-                    result_sender.send((idx, result)).unwrap();
+                    result_tx.send((idx, result)).unwrap();
                 }
             });
         }
 
-        result_receiver.iter().collect()
+        drop(result_tx);
+        result_rx.iter().collect()
     });
 
     if terminated() {
