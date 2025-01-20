@@ -3,7 +3,7 @@ use log::{info, warn};
 use std::time::Duration;
 use std::{
     collections::BTreeMap as Map,
-    io::{BufRead, BufReader, Read, Write},
+    io::{BufRead, BufReader, BufWriter, Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
     thread,
 };
@@ -182,15 +182,17 @@ fn write_result<T>(mut stream: &TcpStream, result: Result<T>) -> Result<T> {
 #[derive(Clone)]
 pub struct Client<'t> {
     remote: &'t str,
+    buffer_size: usize,
     compress_level: i32,
 }
 impl<'t> Client<'t> {
     /// Creates a new client.
     ///
     /// `compress_level`: zstd compression level (1-22). `0` uses zstd's default (currently `3`).
-    pub fn new(remote: &'t str, compress_level: i32) -> Self {
+    pub fn new(remote: &'t str, buffer_size: usize, compress_level: i32) -> Self {
         Self {
             remote,
+            buffer_size,
             compress_level,
         }
     }
@@ -237,7 +239,9 @@ impl<'t> Client<'t> {
     pub fn import(&self, img: &str, snap_name: &str, mut reader: impl Read) -> Result<()> {
         let stream = self.dial(format!("import {img} {snap_name}"))?;
 
-        zstd::stream::copy_encode(&mut reader, &stream, self.compress_level)?;
+        let mut w = BufWriter::with_capacity(self.buffer_size, &stream);
+        zstd::stream::copy_encode(&mut reader, &mut w, self.compress_level)?;
+        w.flush()?;
 
         stream.shutdown(std::net::Shutdown::Write)?;
         self.result(&stream)
@@ -250,7 +254,9 @@ impl<'t> Client<'t> {
     pub fn import_diff(&self, img: &str, mut reader: impl Read) -> Result<()> {
         let stream = self.dial(format!("import_diff {img}"))?;
 
-        zstd::stream::copy_encode(&mut reader, &stream, self.compress_level)?;
+        let mut w = BufWriter::with_capacity(self.buffer_size, &stream);
+        zstd::stream::copy_encode(&mut reader, &mut w, self.compress_level)?;
+        w.flush()?;
 
         stream.shutdown(std::net::Shutdown::Write)?;
         self.result(&stream)

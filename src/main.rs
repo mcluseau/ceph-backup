@@ -32,6 +32,9 @@ enum Commands {
         /// backup destination
         #[arg(long, default_value = DEFAULT_BIND)]
         dest: String,
+        /// send buffer size in KiB
+        #[arg(long, default_value = "4096")]
+        buffer_size: usize,
         /// zstd compression level (1-22) for transmission
         #[arg(short = 'z', long, default_value = "3")]
         compress_level: i32,
@@ -76,9 +79,17 @@ fn main() -> eyre::Result<()> {
         Commands::Rbd {
             pool,
             dest,
+            buffer_size,
             compress_level,
             filter,
-        } => rbd::source::run(&cli.cluster, &pool, &dest, compress_level, &filter),
+        } => rbd::source::run(
+            &cli.cluster,
+            &pool,
+            &dest,
+            buffer_size << 10,
+            compress_level,
+            &filter,
+        ),
         Commands::RbdTarget {
             pool,
             bind_addr,
