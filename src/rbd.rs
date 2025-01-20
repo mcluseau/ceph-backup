@@ -10,19 +10,24 @@ const KEY_PARTIAL: &str = "bck-partial";
 
 #[derive(Clone)]
 pub struct Local<'t> {
+    client_id: &'t str,
     cluster: &'t str,
     pool: &'t str,
 }
 
 impl<'t> Local<'t> {
-    pub fn new(cluster: &'t str, pool: &'t str) -> Self {
-        Self { cluster, pool }
+    pub fn new(client_id: &'t str, cluster: &'t str, pool: &'t str) -> Self {
+        Self {
+            client_id,
+            cluster,
+            pool,
+        }
     }
 
     fn rbd_cmd(&self, args: Vec<&str>) -> (&str, Vec<String>) {
         let mut cmd_args = Vec::with_capacity(2 + args.len());
 
-        for arg in ["--cluster", self.cluster] {
+        for arg in ["--id", self.client_id, "--cluster", self.cluster] {
             cmd_args.push(arg.to_string());
         }
 

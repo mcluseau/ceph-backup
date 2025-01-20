@@ -17,6 +17,9 @@ spec:
           - image: mcluseau/ceph-backup
             name: ceph-backup
             command: [ "ceph-backup", "rbd", "volumes", "--dest=ceph-backup-target:3310" ]
+            #env:
+            #- name:  CEPH_CLIENT_ID
+            #  value: backups
             volumeMounts:
             - mountPath: /etc/ceph
               name: ceph-config

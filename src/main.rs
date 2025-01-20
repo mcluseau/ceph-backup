@@ -12,6 +12,10 @@ struct Cli {
     #[arg(long, default_value = "auto", env = "LOG_STYLE")]
     log_style: String,
 
+    /// client id (without 'client.' prefix)
+    #[arg(long, default_value = "admin", env = "CEPH_CLIENT_ID")]
+    id: String,
+
     /// Ceph cluster
     #[arg(short = 'c', long, default_value = "ceph", env = "CEPH_CLUSTER")]
     cluster: String,
@@ -83,6 +87,7 @@ fn main() -> eyre::Result<()> {
             compress_level,
             filter,
         } => rbd::source::run(
+            &cli.id,
             &cli.cluster,
             &pool,
             &dest,
@@ -94,6 +99,6 @@ fn main() -> eyre::Result<()> {
             pool,
             bind_addr,
             expire_days,
-        } => rbd::target::run(&cli.cluster, &pool, &bind_addr, expire_days),
+        } => rbd::target::run(&cli.id, &cli.cluster, &pool, &bind_addr, expire_days),
     }
 }

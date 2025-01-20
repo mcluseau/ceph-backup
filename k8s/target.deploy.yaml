@@ -32,6 +32,9 @@ spec:
       - image: mcluseau/ceph-backup
         name: ceph-backup
         command: [ "ceph-backup", "rbd-target", "backups", "--bind-addr=0.0.0.0:3310" ]
+        #env:
+        #- name:  CEPH_CLIENT_ID
+        #  value: backups
         volumeMounts:
         - mountPath: /etc/ceph
           name: ceph-config

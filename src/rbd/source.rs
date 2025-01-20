@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::rbd;
 
 pub fn run(
+    client_id: &str,
     cluster: &str,
     pool: &str,
     dest: &str,
@@ -15,7 +16,7 @@ pub fn run(
 ) -> Result<()> {
     info!("cluster {cluster}, pool {pool}");
 
-    let src = rbd::Local::new(cluster, pool);
+    let src = rbd::Local::new(client_id, cluster, pool);
     let tgt = rbd::target::Client::new(dest, buffer_size, compress_level);
 
     BackupRun::new(src, tgt).run(filter)

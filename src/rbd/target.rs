@@ -10,7 +10,13 @@ use std::{
 
 use crate::rbd;
 
-pub fn run(cluster: &str, pool: &str, bind_addr: &str, expire_days: u16) -> Result<()> {
+pub fn run(
+    client_id: &str,
+    cluster: &str,
+    pool: &str,
+    bind_addr: &str,
+    expire_days: u16,
+) -> Result<()> {
     let listener = TcpListener::bind(bind_addr)?;
     info!("listening on {bind_addr}");
 
@@ -27,7 +33,7 @@ pub fn run(cluster: &str, pool: &str, bind_addr: &str, expire_days: u16) -> Resu
         }
     });
 
-    let rbd = rbd::Local::new(cluster, pool);
+    let rbd = rbd::Local::new(client_id, cluster, pool);
 
     thread::scope(|scope| loop {
         let (stream, remote) = loop {
