@@ -26,6 +26,8 @@ struct BackupRun<'t> {
     src: rbd::Local<'t>,
     tgt: rbd::target::Client<'t>,
     error_count: AtomicUsize,
+    n_steps: AtomicUsize,
+    n_done: AtomicUsize,
     stage: &'static str,
 }
 impl<'t> BackupRun<'t> {
@@ -33,6 +35,8 @@ impl<'t> BackupRun<'t> {
         Self {
             src,
             tgt,
+            n_steps: AtomicUsize::new(0),
+            n_done: AtomicUsize::new(0),
             error_count: AtomicUsize::new(0),
             stage: "init",
         }
@@ -85,12 +89,12 @@ impl<'t> BackupRun<'t> {
                 return Err(format_err!("no snapshots found"));
             };
 
-            let snap_name = src_snap.name.as_str();
+            let snap_name = &src_snap.name;
 
             info!("{img}: backup is missing, creating from {snap_name}");
 
             let mut export = self.src.export(&format!("{img}@{snap_name}"))?;
-            self.tgt.import(img, &snap_name, &mut export)
+            self.tgt.import(img, snap_name, &mut export)
         });
 
         // reintroduce successfully created backups
@@ -198,11 +202,19 @@ impl<'t> BackupRun<'t> {
         Ok(())
     }
 
+    fn n_steps(&self) -> usize {
+        self.n_steps.load(Ordering::Relaxed)
+    }
+    fn set_n_steps(&self, n: usize) {
+        self.n_steps.store(n, Ordering::Relaxed);
+    }
+
     fn steps<F: Fn(&str) -> Result<()> + Send + Sync + Copy>(
         &self,
         steps: Vec<String>,
         action: F,
     ) -> Vec<(String, bool)> {
+        self.set_n_steps(steps.len());
         crate::parallel_process(steps, |step| {
             let ok = self.step(&step, action);
             (step, ok)
@@ -215,6 +227,7 @@ impl<'t> BackupRun<'t> {
         steps: Vec<String>,
         action: F,
     ) -> Vec<(String, bool)> {
+        self.set_n_steps(steps.len());
         crate::parallel_process(steps, |step| -> (String, bool) {
             let ok = self.chrono_step(&step, action);
             (step, ok)
@@ -224,10 +237,12 @@ impl<'t> BackupRun<'t> {
     fn stage(&mut self, stage: &'static str) {
         info!("{stage}");
         self.stage = stage;
+        self.n_steps.store(0, Ordering::Relaxed);
+        self.n_done.store(0, Ordering::Relaxed);
     }
 
     fn error(&self) {
-        self.error_count.fetch_add(1, Ordering::SeqCst);
+        self.error_count.fetch_add(1, Ordering::Relaxed);
     }
     fn error_count(&self) -> usize {
         self.error_count.load(Ordering::Relaxed)
@@ -237,31 +252,46 @@ impl<'t> BackupRun<'t> {
     where
         F: Fn(&str) -> Result<()>,
     {
-        let stage = self.stage;
-        if let Err(e) = action(img) {
-            error!("{stage}: {img}: failed: {e}");
-            self.error();
-            false
-        } else {
-            true
-        }
+        let result = action(img);
+        self.step_result(result, |_| {}, |p, e| error!("{p}{img}: failed: {e}"))
     }
     fn chrono_step<F>(&self, img: &str, action: F) -> bool
     where
         F: Fn(&str) -> Result<()>,
     {
-        let stage = self.stage;
-
         let start = now();
         let result = action(img);
         let elapsed = format_duration(now() - start);
 
+        self.step_result(
+            result,
+            |p| info!("{p}{img}: ok after {elapsed}"),
+            |p, e| error!("{p}{img}: failed after {elapsed}: {e}"),
+        )
+    }
+
+    fn step_result<F: Fn(String), E: Fn(String, eyre::Report)>(
+        &self,
+        result: Result<()>,
+        f_ok: F,
+        f_err: E,
+    ) -> bool {
+        let done = self.n_done.fetch_add(1, Ordering::Relaxed) + 1;
+        let total = self.n_steps();
+
+        let stage = self.stage;
+        let prefix = if total == 0 {
+            format!("{stage} [{done}]: ")
+        } else {
+            format!("{stage} [{done}/{total}]: ")
+        };
+
         if let Err(e) = result {
-            error!("{stage}: {img}: failed after {elapsed}: {e}");
             self.error();
+            f_err(prefix, e);
             false
         } else {
-            info!("{stage}: {img}: ok after {elapsed}");
+            f_ok(prefix);
             true
         }
     }
