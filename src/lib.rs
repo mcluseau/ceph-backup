@@ -39,21 +39,8 @@ where
     let mut results: Vec<_> = std::thread::scope(|scope| {
         scope.spawn(move || {
             for item in inputs.into_iter().enumerate() {
-                let mut item = item;
-                loop {
-                    if terminated() {
-                        return;
-                    }
-                    use crossbeam_channel::SendTimeoutError::*;
-                    item = match input_tx.send_timeout(item, Duration::from_secs(1)) {
-                        Ok(_) => {
-                            break;
-                        }
-                        Err(Disconnected(_)) => {
-                            return;
-                        }
-                        Err(Timeout(sent_item)) => sent_item,
-                    };
+                if !send(item, &input_tx) {
+                    return;
                 }
             }
         });
@@ -66,7 +53,7 @@ where
             let result_tx = result_tx.clone();
             let process = &process;
             scope.spawn(move || {
-                for (idx, input) in input_rx.into_iter() {
+                for (idx, input) in input_rx {
                     let result = process(input);
                     result_tx.send((idx, result)).unwrap();
                 }
@@ -83,4 +70,24 @@ where
 
     results.sort_by_key(|v| v.0);
     results.into_iter().map(|(_, r)| r).collect()
+}
+
+fn send<T>(mut item: T, tx: &crossbeam_channel::Sender<T>) -> bool {
+    loop {
+        if terminated() {
+            return false;
+        }
+        use crossbeam_channel::SendTimeoutError::*;
+        match tx.send_timeout(item, Duration::from_secs(1)) {
+            Ok(_) => {
+                return true; // successfully sent
+            }
+            Err(Disconnected(_)) => {
+                return false; // finished without sending
+            }
+            Err(Timeout(sent_item)) => {
+                item = sent_item; // try again
+            }
+        };
+    }
 }

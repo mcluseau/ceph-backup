@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use log::info;
 
 use ceph_backup::rbd;
 
@@ -69,7 +70,10 @@ fn main() -> eyre::Result<()> {
         .format_timestamp_millis()
         .init();
 
-    ceph_backup::set_parallel(cli.parallel);
+    if cli.parallel > 1 {
+        info!("parallel: {}", cli.parallel);
+        ceph_backup::set_parallel(cli.parallel);
+    }
 
     ctrlc::set_handler(|| {
         if ceph_backup::terminated() {
