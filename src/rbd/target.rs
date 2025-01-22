@@ -3,8 +3,8 @@ use log::{info, warn};
 use std::time::Duration;
 use std::{
     collections::BTreeMap as Map,
-    io::{BufRead, BufReader, BufWriter, Read, Write},
-    net::{SocketAddr, TcpListener, TcpStream},
+    io::{self, BufRead, BufReader, BufWriter, Read, Write},
+    net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs},
     thread,
 };
 
@@ -17,14 +17,22 @@ pub fn run(
     bind_addr: &str,
     expire_days: u16,
 ) -> Result<()> {
-    let listener = TcpListener::bind(bind_addr)?;
+    info!("target: cluster {cluster}, pool {pool}");
+
+    let bind_addr = bind_addr.to_socket_addrs()?.next().unwrap();
     info!("listening on {bind_addr}");
+
+    let socket = new_socket(bind_addr)?;
+    socket.bind(&bind_addr.into())?;
+    socket.listen(2)?;
+
+    let listener: TcpListener = socket.into();
 
     let (tx, rx) = crossbeam_channel::bounded(0);
 
     thread::spawn(move || loop {
         let r = listener.accept();
-        let exit = r.is_ok();
+        let exit = r.is_err();
         if tx.send(r).is_err() {
             break;
         }
@@ -57,9 +65,24 @@ pub fn run(
         scope.spawn(move || {
             if let Err(e) = handle_connection(remote, &stream, rbd, expire_days) {
                 warn!("{remote}: failed: {e}");
+            } else {
+                info!("{remote}: done");
             }
         });
     })
+}
+
+fn new_socket(addr: SocketAddr) -> io::Result<socket2::Socket> {
+    use socket2::{Domain, Socket, Type};
+    let socket = Socket::new(Domain::for_address(addr), Type::STREAM, None)?;
+
+    let keepalive = socket2::TcpKeepalive::new()
+        .with_time(Duration::from_secs(30))
+        .with_interval(Duration::from_secs(30));
+    socket.set_tcp_keepalive(&keepalive)?;
+    socket.set_nodelay(false)?;
+
+    Ok(socket)
 }
 
 fn handle_connection(
@@ -68,8 +91,7 @@ fn handle_connection(
     rbd: &rbd::Local,
     expire_days: u16,
 ) -> Result<()> {
-    stream.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
-    stream.set_nodelay(false)?;
+    stream.set_read_timeout(Some(Duration::from_secs(30)))?;
 
     let mut reader = BufReader::new(stream);
 
@@ -186,16 +208,16 @@ fn write_result<T>(mut stream: &TcpStream, result: Result<T>) -> Result<T> {
 }
 
 #[derive(Clone)]
-pub struct Client<'t> {
-    remote: &'t str,
+pub struct Client {
+    remote: SocketAddr,
     buffer_size: usize,
     compress_level: i32,
 }
-impl<'t> Client<'t> {
+impl Client {
     /// Creates a new client.
     ///
     /// `compress_level`: zstd compression level (1-22). `0` uses zstd's default (currently `3`).
-    pub fn new(remote: &'t str, buffer_size: usize, compress_level: i32) -> Self {
+    pub fn new(remote: SocketAddr, buffer_size: usize, compress_level: i32) -> Self {
         Self {
             remote,
             buffer_size,
@@ -204,8 +226,13 @@ impl<'t> Client<'t> {
     }
 
     fn dial(&self, cmd_line: String) -> Result<TcpStream> {
-        let mut stream = TcpStream::connect(self.remote)?;
+        let socket = new_socket(self.remote)?;
+        socket
+            .connect(&self.remote.into())
+            .map_err(|e| format_err!("connect to {} failed: {e}", self.remote))?;
+        let mut stream: TcpStream = socket.into();
         writeln!(stream, "{cmd_line}")?;
+        stream.flush()?;
         Ok(stream)
     }
 

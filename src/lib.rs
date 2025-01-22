@@ -1,10 +1,9 @@
 pub mod rbd;
 
-use log::info;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering::Relaxed as Ordering};
 use std::time::Duration;
 
-const PARALLEL: AtomicU8 = AtomicU8::new(1);
+static PARALLEL: AtomicU8 = AtomicU8::new(1);
 
 pub fn get_parallel() -> u8 {
     PARALLEL.load(Ordering)
@@ -14,7 +13,7 @@ pub fn set_parallel(v: u8) {
     PARALLEL.store(v, Ordering);
 }
 
-const SIGTERM: AtomicBool = AtomicBool::new(false);
+static SIGTERM: AtomicBool = AtomicBool::new(false);
 
 pub fn sigterm() {
     SIGTERM.store(true, Ordering);
@@ -45,10 +44,7 @@ where
             }
         });
 
-        for idx in 0..parallel {
-            if parallel > 1 {
-                info!("starting thread {idx}");
-            }
+        for _ in 0..parallel {
             let input_rx = input_rx.clone();
             let result_tx = result_tx.clone();
             let process = &process;

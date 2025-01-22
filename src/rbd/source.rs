@@ -14,7 +14,10 @@ pub fn run(
     compress_level: i32,
     filter: &str,
 ) -> Result<()> {
-    info!("cluster {cluster}, pool {pool}");
+    info!("source: cluster {cluster}, pool {pool}");
+
+    use std::net::ToSocketAddrs;
+    let dest = dest.to_socket_addrs()?.next().unwrap();
 
     let src = rbd::Local::new(client_id, cluster, pool);
     let tgt = rbd::target::Client::new(dest, buffer_size, compress_level);
@@ -24,20 +27,21 @@ pub fn run(
 
 struct BackupRun<'t> {
     src: rbd::Local<'t>,
-    tgt: rbd::target::Client<'t>,
+    tgt: rbd::target::Client,
     error_count: AtomicUsize,
     n_steps: AtomicUsize,
     n_done: AtomicUsize,
     stage: &'static str,
 }
 impl<'t> BackupRun<'t> {
-    fn new(src: rbd::Local<'t>, tgt: rbd::target::Client<'t>) -> Self {
+    fn new(src: rbd::Local<'t>, tgt: rbd::target::Client) -> Self {
+        let zero = || AtomicUsize::new(0);
         Self {
             src,
             tgt,
-            n_steps: AtomicUsize::new(0),
-            n_done: AtomicUsize::new(0),
-            error_count: AtomicUsize::new(0),
+            n_steps: zero(),
+            n_done: zero(),
+            error_count: zero(),
             stage: "init",
         }
     }
