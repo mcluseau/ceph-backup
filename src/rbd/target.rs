@@ -1,5 +1,5 @@
 use eyre::{format_err, Result};
-use log::{info, warn};
+use log::{error, info, warn};
 use std::time::Duration;
 use std::{
     collections::BTreeMap as Map,
@@ -161,30 +161,41 @@ fn handle_connection(
 fn expire_backups(rbd: &rbd::Local, expire_days: u16) -> Result<()> {
     let deadline = chrono::Utc::now().naive_utc() - chrono::TimeDelta::days(expire_days as i64);
 
-    for img in rbd.ls()? {
-        for snap in rbd.snap_ls(&img)? {
+    let images = (rbd.ls()).map_err(|e| format_err!("failed to list images: {e}"))?;
+
+    crate::parallel_process(images, |img| {
+        let Ok(snaps) = rbd
+            .snap_ls(&img)
+            .inspect_err(|e| error!("{img}: failed to list snapshots: {e}"))
+        else {
+            return;
+        };
+
+        let mut removed = 0;
+        for snap in &snaps {
             let Ok(ts) = snap.timestamp() else {
                 continue;
             };
-
             if ts >= deadline {
                 continue;
             }
 
-            let snap_name = snap.name;
-            info!("{img}: removing snapshot {snap_name}");
-            if let Err(e) = rbd.snap_remove(&img, &snap_name) {
-                warn!("{img}: failed to remove snapshot {snap_name}: {e}");
+            info!("{img}: removing snapshot {}", snap.name);
+            if let Err(e) = rbd.snap_remove(&img, &snap.name) {
+                warn!("{img}: failed to remove snapshot {}: {e}", snap.name);
+                continue;
             }
+
+            removed += 1;
         }
 
-        if rbd.snap_ls(&img)?.is_empty() {
+        if removed == snaps.len() {
             info!("{img}: no more snapshots, removing");
             if let Err(e) = rbd.remove(&img) {
                 warn!("{img}: failed to remove: {e}");
             }
         }
-    }
+    });
 
     Ok(())
 }
