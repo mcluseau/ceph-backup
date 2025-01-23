@@ -163,41 +163,18 @@ fn expire_backups(rbd: &rbd::Local, expire_days: u16) -> Result<()> {
 
     let images = (rbd.ls()).map_err(|e| format_err!("failed to list images: {e}"))?;
 
-    crate::parallel_process(images, |img| {
-        let Ok(snaps) = rbd
-            .snap_ls(&img)
-            .inspect_err(|e| error!("{img}: failed to list snapshots: {e}"))
-        else {
-            return;
-        };
-
-        let mut removed = 0;
-        for snap in &snaps {
-            let Ok(ts) = snap.timestamp() else {
-                continue;
-            };
-            if ts >= deadline {
-                continue;
-            }
-
-            info!("{img}: removing snapshot {}", snap.name);
-            if let Err(e) = rbd.snap_remove(&img, &snap.name) {
-                warn!("{img}: failed to remove snapshot {}: {e}", snap.name);
-                continue;
-            }
-
-            removed += 1;
-        }
-
-        if removed == snaps.len() {
-            info!("{img}: no more snapshots, removing");
-            if let Err(e) = rbd.remove(&img) {
-                warn!("{img}: failed to remove: {e}");
-            }
-        }
+    let results = crate::parallel_process(images, |img| -> bool {
+        rbd.expire_backups(&img, &deadline)
+            .inspect_err(|e| error!("{img}: {e}"))
+            .is_ok()
     });
 
-    Ok(())
+    let n_err = results.into_iter().filter(|ok| !ok).count();
+    if n_err == 0 {
+        Ok(())
+    } else {
+        Err(format_err!("{n_err} errors"))
+    }
 }
 
 fn write_json<T: serde::Serialize>(stream: &TcpStream, result: Result<T>) -> Result<()> {

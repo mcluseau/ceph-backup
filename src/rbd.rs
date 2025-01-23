@@ -3,7 +3,7 @@ pub mod target;
 
 use chrono::NaiveDateTime;
 use eyre::{format_err, Result};
-use log::{error, warn};
+use log::{error, info, warn};
 use std::collections::BTreeMap as Map;
 
 const KEY_PARTIAL: &str = "bck-partial";
@@ -309,6 +309,37 @@ impl<'t> Local<'t> {
         }
 
         self.meta_set(img, KEY_PARTIAL, &false)
+    }
+
+    fn expire_backups(&self, img: &str, deadline: &chrono::NaiveDateTime) -> Result<()> {
+        let snaps = self
+            .snap_ls(&img)
+            .map_err(|e| format_err!("failed to list snapshots: {e}"))?;
+
+        let mut removed = 0;
+        for snap in &snaps {
+            let Ok(ts) = snap.timestamp() else {
+                continue;
+            };
+            if &ts >= deadline {
+                continue;
+            }
+
+            let snap_name = &snap.name;
+            info!("{img}: removing snapshot {snap_name}");
+            self.snap_remove(&img, &snap.name)
+                .map_err(|e| format_err!("failed to remove snapshot {snap_name}: {e}"))?;
+
+            removed += 1;
+        }
+
+        if removed == snaps.len() {
+            info!("{img}: no more snapshots, removing");
+            if let Err(e) = self.remove(&img) {
+                warn!("{img}: failed to remove: {e}");
+            }
+        }
+        Ok(())
     }
 }
 
