@@ -188,11 +188,11 @@ fn write_result<T>(mut stream: &TcpStream, result: Result<T>) -> Result<T> {
         Ok(_) => stream.write(b"OK \n"),
         Err(_) => stream.write(b"ERR\n"),
     };
-    if result.is_err() {
-        return result;
+    match (result, write_result) {
+        (Ok(v), Ok(_)) => Ok(v),
+        (Err(e), _) => Err(e),
+        (_, Err(e)) => Err(format_err!("write result failed: {e}")),
     }
-    write_result?;
-    result
 }
 
 #[derive(Clone)]
