@@ -181,10 +181,24 @@ impl<'t> BackupRun<'t> {
 
         for to_snap in src_snaps_to_send {
             let to_snap = to_snap.name.clone();
-            info!("{img}: sending diff {from_snap} -> {to_snap}");
 
-            let mut export = self.src.export_diff(img, &from_snap, &to_snap)?;
-            self.tgt.import_diff(img, &mut export)?;
+            let mut send_try = 0;
+            loop {
+                info!("{img}: sending diff {from_snap} -> {to_snap}");
+
+                let mut export = self.src.export_diff(img, &from_snap, &to_snap)?;
+                let result = self.tgt.import_diff(img, &mut export);
+                if let Err(e) = result {
+                    if send_try == 3 {
+                        return Err(e);
+                    }
+                    send_try += 1;
+                    warn!("{img}: try {send_try} failed, reverting and retrying: {e}");
+                    self.tgt.prepare_import_diff(img)?;
+                    continue;
+                }
+                break;
+            }
 
             from_snap = to_snap;
         }
