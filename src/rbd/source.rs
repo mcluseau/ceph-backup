@@ -200,19 +200,10 @@ impl<'t> BackupRun<'t> {
                 break;
             }
 
+            info!("{img}: removing source snapshot {from_snap}");
+            self.src.snap_remove(img, &from_snap)?;
+
             from_snap = to_snap;
-        }
-
-        let mut tgt_snaps = self.tgt.snap_ls(img)?;
-        tgt_snaps.sort();
-        let tgt_snaps: Vec<_> = (tgt_snaps.iter())
-            .take_while(|s| s.name != from_snap)
-            .collect();
-
-        for snap in (src_snaps.iter()).filter(|s| tgt_snaps.iter().any(|ts| ts.name == s.name)) {
-            let snap = &snap.name;
-            info!("{img}: removing source snapshot {snap}");
-            self.src.snap_remove(img, snap)?;
         }
 
         self.tgt.meta_sync(img, &self.src.meta_list(img)?)?;
