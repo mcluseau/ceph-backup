@@ -250,22 +250,23 @@ impl<'t> Local<'t> {
         Ok(())
     }
 
-    pub fn prepare_import_diff(&self, img: &str) -> Result<()> {
+    pub fn need_rollback(&self, img: &str) -> Result<bool> {
+        Ok(match self.meta_get(img, KEY_PARTIAL)? {
+            // partial import detected, rollback to snapshot
+            // if no partial import info, assume it is partial too
+            None | Some(true) => true,
+            // no partial import
+            Some(false) => false,
+        })
+    }
+
+    pub fn rollback(&self, img: &str) -> Result<()> {
         let mut rollback_snap = self.snap_ls(img)?;
         rollback_snap.sort();
         let rollback_snap = rollback_snap.last().map(|s| &s.name).unwrap(); // assume a snapshot exists
 
-        match self.meta_get(img, KEY_PARTIAL)? {
-            // partial import detected, rollback to snapshot
-            // if no partial import info, assume it is partial too
-            None | Some(true) => {
-                self.snap_rollback(img, rollback_snap)?;
-                self.meta_set(img, KEY_PARTIAL, &false)
-            }
-
-            // no partial import
-            Some(false) => Ok(()),
-        }
+        self.snap_rollback(img, rollback_snap)?;
+        self.meta_set(img, KEY_PARTIAL, &false)
     }
 
     pub fn import_diff(&self, img: &str, input: &mut impl std::io::Read) -> Result<()> {

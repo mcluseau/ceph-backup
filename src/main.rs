@@ -20,10 +20,6 @@ struct Cli {
     #[arg(short = 'c', long, default_value = "ceph", env = "CEPH_CLUSTER")]
     cluster: String,
 
-    /// Parallelism (for operations supporting it)
-    #[arg(short = 'P', long, default_value = "1")]
-    parallel: u8,
-
     #[command(subcommand)]
     command: Commands,
 }
@@ -45,6 +41,15 @@ enum Commands {
         /// image name filter
         #[arg(short = 'F', long, default_value = "*")]
         filter: String,
+        /// Parallel snapshot creation operations
+        #[arg(long, default_value = "4")]
+        parallel_snap_create: u8,
+        /// Parallel import operations
+        #[arg(long, default_value = "2")]
+        parallel_import: u8,
+        /// Parallel rollback operations
+        #[arg(long, default_value = "1")]
+        parallel_rollback: u8,
     },
     RbdTarget {
         /// target pool
@@ -55,6 +60,9 @@ enum Commands {
         /// days before a snapshot is considered expired
         #[arg(long, default_value = "30")]
         expire_days: u16,
+        /// Parallel expire operations
+        #[arg(long, default_value = "2")]
+        parallel_expire: u8,
     },
 }
 
@@ -68,10 +76,6 @@ fn main() -> eyre::Result<()> {
         .parse_write_style(cli.log_style.as_str())
         .format_timestamp_millis()
         .init();
-
-    if cli.parallel != 0 {
-        ceph_backup::set_parallel(cli.parallel);
-    }
 
     ctrlc::set_handler(|| {
         if ceph_backup::terminated() {
@@ -88,6 +92,9 @@ fn main() -> eyre::Result<()> {
             buffer_size,
             compress_level,
             filter,
+            parallel_snap_create,
+            parallel_import,
+            parallel_rollback,
         } => rbd::source::run(
             &cli.id,
             &cli.cluster,
@@ -96,11 +103,26 @@ fn main() -> eyre::Result<()> {
             buffer_size << 10,
             compress_level,
             &filter,
+            rbd::source::Parallel {
+                snap_create: parallel_snap_create,
+                import: parallel_import,
+                rollback: parallel_rollback,
+            },
         ),
         Commands::RbdTarget {
             pool,
             bind_addr,
             expire_days,
-        } => rbd::target::run(&cli.id, &cli.cluster, &pool, &bind_addr, expire_days),
+            parallel_expire,
+        } => rbd::target::run(
+            &cli.id,
+            &cli.cluster,
+            &pool,
+            &bind_addr,
+            expire_days,
+            rbd::target::Parallel {
+                expire: parallel_expire,
+            },
+        ),
     }
 }

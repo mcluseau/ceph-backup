@@ -10,12 +10,17 @@ use std::{
 
 use crate::rbd;
 
+pub struct Parallel {
+    pub expire: u8,
+}
+
 pub fn run(
     client_id: &str,
     cluster: &str,
     pool: &str,
     bind_addr: &str,
     expire_days: u16,
+    parallel: Parallel,
 ) -> Result<()> {
     info!("target: cluster {cluster}, pool {pool}");
 
@@ -61,9 +66,10 @@ pub fn run(
         };
 
         let rbd = &rbd;
+        let parallel = &parallel;
 
         scope.spawn(move || {
-            if let Err(e) = handle_connection(remote, &stream, rbd, expire_days) {
+            if let Err(e) = handle_connection(remote, &stream, rbd, parallel, expire_days) {
                 warn!("{remote}: failed: {e}");
             } else {
                 info!("{remote}: done");
@@ -89,6 +95,7 @@ fn handle_connection(
     remote: SocketAddr,
     mut stream: &TcpStream,
     rbd: &rbd::Local,
+    parallel: &Parallel,
     expire_days: u16,
 ) -> Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(30)))?;
@@ -125,9 +132,13 @@ fn handle_connection(
             let mut zstd_in = zstd::Decoder::new(reader)?;
             write_result(stream, rbd.import(img, snap_name, &mut zstd_in))?;
         }
-        "prepare_import_diff" => {
+        "need_rollback" => {
             let img = split.next().ok_or(format_err!("no image"))?;
-            write_result(stream, rbd.prepare_import_diff(img))?;
+            write_json(stream, rbd.need_rollback(img))?;
+        }
+        "rollback" => {
+            let img = split.next().ok_or(format_err!("no image"))?;
+            write_result(stream, rbd.rollback(img))?;
         }
         "import_diff" => {
             let img = split.next().ok_or(format_err!("no image"))?;
@@ -136,7 +147,7 @@ fn handle_connection(
             write_result(stream, rbd.import_diff(img, &mut zstd_in))?;
         }
         "expire" => {
-            write_result(stream, expire_backups(rbd, expire_days))?;
+            write_result(stream, expire_backups(rbd, parallel.expire, expire_days))?;
         }
         "meta_sync" => {
             let img = split.next().ok_or(format_err!("no image"))?;
@@ -158,12 +169,12 @@ fn handle_connection(
     Ok(())
 }
 
-fn expire_backups(rbd: &rbd::Local, expire_days: u16) -> Result<()> {
+fn expire_backups(rbd: &rbd::Local, parallel: u8, expire_days: u16) -> Result<()> {
     let deadline = chrono::Utc::now().naive_utc() - chrono::TimeDelta::days(expire_days as i64);
 
     let images = (rbd.ls()).map_err(|e| format_err!("failed to list images: {e}"))?;
 
-    let results = crate::parallel_process(images, |img| -> bool {
+    let results = crate::parallel_process(parallel, images, |img| -> bool {
         rbd.expire_backups(&img, &deadline)
             .inspect_err(|e| error!("{img}: {e}"))
             .is_ok()
@@ -268,8 +279,12 @@ impl Client {
         self.result(&stream)
     }
 
-    pub fn prepare_import_diff(&self, img: &str) -> Result<()> {
-        self.dial_noout(format!("prepare_import_diff {img}"))
+    pub fn need_rollback(&self, img: &str) -> Result<bool> {
+        self.dial_json(format!("need_rollback {img}"))
+    }
+
+    pub fn rollback(&self, img: &str) -> Result<()> {
+        self.dial_noout(format!("rollback {img}"))
     }
 
     pub fn import_diff(&self, img: &str, mut reader: impl Read) -> Result<()> {

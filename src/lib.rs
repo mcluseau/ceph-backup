@@ -1,17 +1,8 @@
 pub mod rbd;
+pub mod semaphore;
 
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering::Relaxed as Ordering};
+use std::sync::atomic::{AtomicBool, Ordering::Relaxed as Ordering};
 use std::time::Duration;
-
-static PARALLEL: AtomicU8 = AtomicU8::new(1);
-
-pub fn get_parallel() -> u8 {
-    PARALLEL.load(Ordering)
-}
-
-pub fn set_parallel(v: u8) {
-    PARALLEL.store(v, Ordering);
-}
 
 static SIGTERM: AtomicBool = AtomicBool::new(false);
 
@@ -23,6 +14,7 @@ pub fn terminated() -> bool {
 }
 
 pub fn parallel_process<T: Send, R: Send, F>(
+    parallel: u8,
     inputs: impl IntoIterator<Item = T> + Send,
     process: F,
 ) -> Vec<R>
@@ -30,8 +22,6 @@ where
     F: Fn(T) -> R,
     F: Send + Sync,
 {
-    let parallel = get_parallel();
-
     let (result_tx, result_rx) = crossbeam_channel::bounded(0);
     let (input_tx, input_rx) = crossbeam_channel::bounded(0);
 

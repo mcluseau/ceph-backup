@@ -1,9 +1,18 @@
 use eyre::{format_err, Result};
 use glob_match::glob_match;
 use log::{error, info, warn};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Mutex,
+};
 
 use crate::rbd;
+
+pub struct Parallel {
+    pub snap_create: u8,
+    pub import: u8,
+    pub rollback: u8,
+}
 
 pub fn run(
     client_id: &str,
@@ -13,6 +22,7 @@ pub fn run(
     buffer_size: usize,
     compress_level: i32,
     filter: &str,
+    parallel: Parallel,
 ) -> Result<()> {
     info!("source: cluster {cluster}, pool {pool}");
 
@@ -22,27 +32,27 @@ pub fn run(
     let src = rbd::Local::new(client_id, cluster, pool);
     let tgt = rbd::target::Client::new(dest, buffer_size, compress_level);
 
-    BackupRun::new(src, tgt).run(filter)
+    BackupRun::new(src, tgt, parallel).run(filter)
 }
 
 struct BackupRun<'t> {
     src: rbd::Local<'t>,
     tgt: rbd::target::Client,
-    error_count: AtomicUsize,
     n_steps: AtomicUsize,
     n_done: AtomicUsize,
-    stage: &'static str,
+    stage: &'t str,
+    parallel: Parallel,
 }
 impl<'t> BackupRun<'t> {
-    fn new(src: rbd::Local<'t>, tgt: rbd::target::Client) -> Self {
+    fn new(src: rbd::Local<'t>, tgt: rbd::target::Client, parallel: Parallel) -> Self {
         let zero = || AtomicUsize::new(0);
         Self {
             src,
             tgt,
             n_steps: zero(),
             n_done: zero(),
-            error_count: zero(),
             stage: "init",
+            parallel,
         }
     }
 
@@ -57,7 +67,7 @@ impl<'t> BackupRun<'t> {
 
         // --------------------------------------------------------------
         self.stage("creating snapshots");
-        let results = self.steps(images, |img| -> Result<()> {
+        let results = self.steps(self.parallel.snap_create, images, |img| -> Result<()> {
             let snapshots = self.src.snap_ls(img)?;
             let latest = snapshots.iter().filter_map(|s| s.timestamp().ok()).max();
 
@@ -85,52 +95,101 @@ impl<'t> BackupRun<'t> {
             }
         }
 
-        let results = self.chrono_steps(missing_backups, |img| -> Result<()> {
-            let mut src_snaps = self.src.snap_ls(img)?;
-            src_snaps.sort();
+        let results =
+            self.chrono_steps(self.parallel.import, missing_backups, |img| -> Result<()> {
+                let mut src_snaps = self.src.snap_ls(img)?;
+                src_snaps.sort();
 
-            let Some(src_snap) = src_snaps.first() else {
-                return Err(format_err!("no snapshots found"));
-            };
+                let Some(src_snap) = src_snaps.first() else {
+                    return Err(format_err!("no snapshots found"));
+                };
 
-            let snap_name = &src_snap.name;
+                let snap_name = &src_snap.name;
 
-            info!("{img}: backup is missing, creating from {snap_name}");
+                info!("{img}: backup is missing, creating from {snap_name}");
 
-            let mut export = self.src.export(&format!("{img}@{snap_name}"))?;
-            self.tgt.import(img, snap_name, &mut export)
-        });
+                let mut export = self.src.export(&format!("{img}@{snap_name}"))?;
+                self.tgt.import(img, snap_name, &mut export)
+            });
+
+        let (ok, failed_missing) = results.split();
 
         // reintroduce successfully created backups
-        images.extend(results.all_ok());
+        images.extend(ok);
         images.sort();
 
         // --------------------------------------------------------------
-        self.stage("backup snapshots");
-        let results = self.chrono_steps(images, |img| -> Result<()> { self.backup_snapshots(img) });
-        let maybe_partials = results.all_err().collect();
+        self.stage("analyzing target");
+        let ready = Mutex::new(Vec::new());
+        let partials = Mutex::new(Vec::new());
+
+        self.steps(4, images, |img| -> Result<()> {
+            if self.tgt.need_rollback(&img)? {
+                partials.lock().unwrap().push(img.to_string());
+            } else {
+                ready.lock().unwrap().push(img.to_string());
+            }
+            Ok(())
+        });
+
+        let ready = ready.into_inner().unwrap();
+        let mut partials = partials.into_inner().unwrap();
+
+        self.stage("backup snapshots ready for import");
+        let results = self.chrono_steps(self.parallel.import, ready, |img| -> Result<()> {
+            self.backup_snapshots(img)
+        });
+        partials.extend(results.all_err());
+
+        for _ in 1..3 {
+            if partials.is_empty() {
+                break;
+            }
+
+            self.stage("rollback partials to retry backup");
+            let results =
+                self.chrono_steps(self.parallel.rollback, partials, |img| -> Result<()> {
+                    self.tgt.rollback(img)
+                });
+            let (ready, failed) = results.split();
+            partials = failed;
+
+            self.stage("backup snapshots after rollback");
+            let results = self.chrono_steps(self.parallel.import, ready, |img| -> Result<()> {
+                self.backup_snapshots(img)
+            });
+            partials.extend(results.all_err());
+        }
 
         // --------------------------------------------------------------
         self.stage("expiring remote backups");
         if let Err(e) = self.tgt.expire() {
-            error!("expiration failed: {e}");
-            self.error();
+            warn!("expiration failed: {e}");
         }
 
         // --------------------------------------------------------------
-        self.stage("rollback partials diffs");
-        self.chrono_steps(maybe_partials, |img| -> Result<()> {
-            self.tgt.prepare_import_diff(img)
-        });
+        if !partials.is_empty() {
+            self.stage("rollback partials diffs");
+            self.chrono_steps(
+                self.parallel.rollback,
+                partials.clone(),
+                |img| -> Result<()> { self.tgt.rollback(img) },
+            );
+        }
 
         // --------------------------------------------------------------
-        let error_count = self.error_count();
-        if error_count == 0 {
+        if failed_missing.is_empty() && partials.is_empty() {
             info!("backups done without errors");
             Ok(())
         } else {
-            warn!("backups done with {error_count} errors");
-            Err(format_err!("{error_count} errors"))
+            warn!("backups done with errors:");
+            for img in failed_missing {
+                warn!("- {img} is missing in target and could not be imported");
+            }
+            for img in partials {
+                warn!("- {img} backup is partial");
+            }
+            Err(format_err!("backups done with errors"))
         }
     }
 
@@ -174,31 +233,12 @@ impl<'t> BackupRun<'t> {
             .skip(1)
             .collect();
 
-        if !src_snaps_to_send.is_empty() {
-            info!("{img}: preparing for diff import");
-            self.tgt.prepare_import_diff(img)?;
-        }
-
         for to_snap in src_snaps_to_send {
             let to_snap = to_snap.name.clone();
 
-            let mut send_try = 0;
-            loop {
-                info!("{img}: sending diff {from_snap} -> {to_snap}");
-
-                let mut export = self.src.export_diff(img, &from_snap, &to_snap)?;
-                let result = self.tgt.import_diff(img, &mut export);
-                if let Err(e) = result {
-                    if send_try == 3 {
-                        return Err(e);
-                    }
-                    send_try += 1;
-                    warn!("{img}: try {send_try} failed, reverting and retrying: {e}");
-                    self.tgt.prepare_import_diff(img)?;
-                    continue;
-                }
-                break;
-            }
+            info!("{img}: sending diff {from_snap} -> {to_snap}");
+            let mut export = self.src.export_diff(img, &from_snap, &to_snap)?;
+            self.tgt.import_diff(img, &mut export)?;
 
             info!("{img}: removing source snapshot {from_snap}");
             self.src.snap_remove(img, &from_snap)?;
@@ -206,7 +246,9 @@ impl<'t> BackupRun<'t> {
             from_snap = to_snap;
         }
 
-        self.tgt.meta_sync(img, &self.src.meta_list(img)?)?;
+        info!("{img}: sending metadata");
+        let meta_list = self.src.meta_list(img)?;
+        self.tgt.meta_sync(img, &meta_list)?;
 
         Ok(())
     }
@@ -220,11 +262,12 @@ impl<'t> BackupRun<'t> {
 
     fn steps<F: Fn(&str) -> Result<()> + Send + Sync + Copy>(
         &self,
+        parallel: u8,
         steps: Vec<String>,
         action: F,
     ) -> Vec<(String, bool)> {
         self.set_n_steps(steps.len());
-        crate::parallel_process(steps, |step| {
+        crate::parallel_process(parallel, steps, |step| {
             let ok = self.step(&step, action);
             (step, ok)
         })
@@ -233,11 +276,12 @@ impl<'t> BackupRun<'t> {
     /// process given steps, returning successful ones.
     fn chrono_steps<F: Fn(&str) -> Result<()> + Send + Sync + Copy>(
         &self,
+        parallel: u8,
         steps: Vec<String>,
         action: F,
     ) -> Vec<(String, bool)> {
         self.set_n_steps(steps.len());
-        crate::parallel_process(steps, |step| -> (String, bool) {
+        crate::parallel_process(parallel, steps, |step| -> (String, bool) {
             let ok = self.chrono_step(&step, action);
             (step, ok)
         })
@@ -248,13 +292,6 @@ impl<'t> BackupRun<'t> {
         self.stage = stage;
         self.n_steps.store(0, Ordering::Relaxed);
         self.n_done.store(0, Ordering::Relaxed);
-    }
-
-    fn error(&self) {
-        self.error_count.fetch_add(1, Ordering::Relaxed);
-    }
-    fn error_count(&self) -> usize {
-        self.error_count.load(Ordering::Relaxed)
     }
 
     fn step<F>(&self, img: &str, action: F) -> bool
@@ -296,7 +333,6 @@ impl<'t> BackupRun<'t> {
         };
 
         if let Err(e) = result {
-            self.error();
             f_err(prefix, e);
             false
         } else {
@@ -334,6 +370,7 @@ fn now() -> chrono::DateTime<chrono::Utc> {
 trait StepResults {
     fn all_ok(self) -> impl Iterator<Item = String>;
     fn all_err(self) -> impl Iterator<Item = String>;
+    fn split(self) -> (Vec<String>, Vec<String>);
 }
 impl StepResults for Vec<(String, bool)> {
     fn all_ok(self) -> impl Iterator<Item = String> {
@@ -342,5 +379,22 @@ impl StepResults for Vec<(String, bool)> {
     fn all_err(self) -> impl Iterator<Item = String> {
         self.into_iter()
             .filter_map(|(img, ok)| (!ok).then_some(img))
+    }
+    fn split(self) -> (Vec<String>, Vec<String>) {
+        let n_ok = self.iter().filter(|(_, ok)| *ok).count();
+        let n_err = self.iter().filter(|(_, ok)| !ok).count();
+
+        let mut oks = Vec::with_capacity(n_ok);
+        let mut errs = Vec::with_capacity(n_err);
+
+        for (img, ok) in self {
+            if ok {
+                oks.push(img);
+            } else {
+                errs.push(img);
+            }
+        }
+
+        (oks, errs)
     }
 }
