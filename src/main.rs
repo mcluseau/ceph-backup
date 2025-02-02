@@ -79,9 +79,10 @@ fn main() -> eyre::Result<()> {
 
     ctrlc::set_handler(|| {
         if ceph_backup::terminated() {
-            eprintln!("already got termination signal, exiting immediately");
+            eprintln!("got a 2nd termination signal, exiting immediately");
             std::process::exit(1);
         }
+        eprintln!("got termination signal");
         ceph_backup::sigterm();
     })?;
 
