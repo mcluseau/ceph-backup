@@ -20,6 +20,7 @@ pub fn run(
     pool: &str,
     bind_addr: &str,
     expire_days: u16,
+    buf_size: usize,
     parallel: Parallel,
 ) -> Result<()> {
     info!("target: cluster {cluster}, pool {pool}");
@@ -46,7 +47,7 @@ pub fn run(
         }
     });
 
-    let rbd = rbd::Local::new(client_id, cluster, pool);
+    let rbd = rbd::Local::new(client_id, cluster, pool, buf_size);
 
     thread::scope(|scope| loop {
         let (stream, remote) = loop {
@@ -209,17 +210,15 @@ fn write_result<T>(mut stream: &TcpStream, result: Result<T>) -> Result<T> {
 #[derive(Clone)]
 pub struct Client {
     remote: SocketAddr,
-    buffer_size: usize,
     compress_level: i32,
 }
 impl Client {
     /// Creates a new client.
     ///
     /// `compress_level`: zstd compression level (1-22). `0` uses zstd's default (currently `3`).
-    pub fn new(remote: SocketAddr, buffer_size: usize, compress_level: i32) -> Self {
+    pub fn new(remote: SocketAddr, compress_level: i32) -> Self {
         Self {
             remote,
-            buffer_size,
             compress_level,
         }
     }
@@ -271,7 +270,7 @@ impl Client {
     pub fn import(&self, img: &str, snap_name: &str, mut reader: impl Read) -> Result<()> {
         let stream = self.dial(format!("import {img} {snap_name}"))?;
 
-        let mut w = BufWriter::with_capacity(self.buffer_size, &stream);
+        let mut w = BufWriter::new(&stream);
         zstd::stream::copy_encode(&mut reader, &mut w, self.compress_level)?;
         w.flush()?;
 
@@ -290,7 +289,7 @@ impl Client {
     pub fn import_diff(&self, img: &str, mut reader: impl Read) -> Result<()> {
         let stream = self.dial(format!("import_diff {img}"))?;
 
-        let mut w = BufWriter::with_capacity(self.buffer_size, &stream);
+        let mut w = BufWriter::new(&stream);
         zstd::stream::copy_encode(&mut reader, &mut w, self.compress_level)?;
         w.flush()?;
 

@@ -29,8 +29,8 @@ pub fn run(
     use std::net::ToSocketAddrs;
     let dest = dest.to_socket_addrs()?.next().unwrap();
 
-    let src = rbd::Local::new(client_id, cluster, pool);
-    let tgt = rbd::target::Client::new(dest, buffer_size, compress_level);
+    let src = rbd::Local::new(client_id, cluster, pool, buffer_size);
+    let tgt = rbd::target::Client::new(dest, compress_level);
 
     BackupRun::new(src, tgt, parallel).run(filter)
 }

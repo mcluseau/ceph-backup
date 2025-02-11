@@ -63,6 +63,9 @@ enum Commands {
         /// Parallel expire operations
         #[arg(long, default_value = "2")]
         parallel_expire: u8,
+        /// Import buffer size in KiB
+        #[arg(long, default_value = "4096")]
+        buffer_size: usize,
     },
 }
 
@@ -115,12 +118,14 @@ fn main() -> eyre::Result<()> {
             bind_addr,
             expire_days,
             parallel_expire,
+            buffer_size,
         } => rbd::target::run(
             &cli.id,
             &cli.cluster,
             &pool,
             &bind_addr,
             expire_days,
+            buffer_size << 10,
             rbd::target::Parallel {
                 expire: parallel_expire,
             },

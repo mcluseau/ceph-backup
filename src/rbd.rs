@@ -5,6 +5,7 @@ use chrono::NaiveDateTime;
 use eyre::{format_err, Result};
 use log::{error, info, warn};
 use std::collections::BTreeMap as Map;
+use std::io::Read;
 
 const KEY_PARTIAL: &str = "bck-partial";
 
@@ -13,14 +14,16 @@ pub struct Local<'t> {
     client_id: &'t str,
     cluster: &'t str,
     pool: &'t str,
+    buf_size: usize,
 }
 
 impl<'t> Local<'t> {
-    pub fn new(client_id: &'t str, cluster: &'t str, pool: &'t str) -> Self {
+    pub fn new(client_id: &'t str, cluster: &'t str, pool: &'t str, buf_size: usize) -> Self {
         Self {
             client_id,
             cluster,
             pool,
+            buf_size,
         }
     }
 
@@ -113,7 +116,7 @@ impl<'t> Local<'t> {
         self.run(&["trash", "move", "--expires-at=30 days", img])
     }
 
-    pub fn export(&self, src_spec: &str) -> Result<duct::ReaderHandle> {
+    pub fn export(&self, src_spec: &str) -> Result<impl Read> {
         let (cmd, args) = self.rbd_cmd(vec![
             "-p",
             self.pool,
@@ -122,15 +125,10 @@ impl<'t> Local<'t> {
             src_spec,
             "-",
         ]);
-        Ok(duct::cmd(cmd, args).reader()?)
+        Ok(self.reader(duct::cmd(cmd, args).reader()?))
     }
 
-    pub fn export_diff(
-        &self,
-        img: &str,
-        from_snap: &str,
-        to_snap: &str,
-    ) -> Result<duct::ReaderHandle> {
+    pub fn export_diff(&self, img: &str, from_snap: &str, to_snap: &str) -> Result<impl Read> {
         let (cmd, args) = self.rbd_cmd(vec![
             "-p",
             self.pool,
@@ -141,7 +139,11 @@ impl<'t> Local<'t> {
             &format!("{img}@{to_snap}"),
             "-",
         ]);
-        Ok(duct::cmd(cmd, args).reader()?)
+        Ok(self.reader(duct::cmd(cmd, args).reader()?))
+    }
+
+    fn reader<R: std::io::Read>(&self, input: R) -> impl Read {
+        std::io::BufReader::with_capacity(self.buf_size, input)
     }
 
     pub fn import(&self, img: &str, snap_name: &str, input: &mut impl std::io::Read) -> Result<()> {
@@ -160,10 +162,11 @@ impl<'t> Local<'t> {
             .spawn()?;
 
         let result = || -> Result<()> {
+            let mut input = self.reader(input);
             let stdin = rbd_import.stdin.as_mut().unwrap();
 
             let copy_result =
-                std::io::copy(input, stdin).map_err(|e| format_err!("copy failed: {e}"));
+                std::io::copy(&mut input, stdin).map_err(|e| format_err!("copy failed: {e}"));
 
             let status = rbd_import
                 .wait()
@@ -292,9 +295,11 @@ impl<'t> Local<'t> {
             .stdin(std::process::Stdio::piped())
             .spawn()?;
 
+        let mut input = self.reader(input);
         let stdin = rbd_import.stdin.as_mut().unwrap();
 
-        let copy_result = std::io::copy(input, stdin).map_err(|e| format_err!("copy failed: {e}"));
+        let copy_result =
+            std::io::copy(&mut input, stdin).map_err(|e| format_err!("copy failed: {e}"));
 
         let status = rbd_import
             .wait()
