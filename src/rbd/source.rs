@@ -67,7 +67,7 @@ impl<'t> BackupRun<'t> {
 
         // --------------------------------------------------------------
         self.stage("creating snapshots");
-        let results = self.steps(self.parallel.snap_create, images, |img| -> Result<()> {
+        let results = self.steps(self.parallel.snap_create, images, |img| {
             let snapshots = self.src.snap_ls(img)?;
             let latest = snapshots.iter().filter_map(|s| s.timestamp().ok()).max();
 
@@ -95,22 +95,21 @@ impl<'t> BackupRun<'t> {
             }
         }
 
-        let results =
-            self.chrono_steps(self.parallel.import, missing_backups, |img| -> Result<()> {
-                let mut src_snaps = self.src.snap_ls(img)?;
-                src_snaps.sort();
+        let results = self.chrono_steps(self.parallel.import, missing_backups, |img| {
+            let mut src_snaps = self.src.snap_ls(img)?;
+            src_snaps.sort();
 
-                let Some(src_snap) = src_snaps.first() else {
-                    return Err(format_err!("no snapshots found"));
-                };
+            let Some(src_snap) = src_snaps.first() else {
+                return Err(format_err!("no snapshots found"));
+            };
 
-                let snap_name = &src_snap.name;
+            let snap_name = &src_snap.name;
 
-                info!("{img}: backup is missing, creating from {snap_name}");
+            info!("{img}: backup is missing, creating from {snap_name}");
 
-                let mut export = self.src.export(&format!("{img}@{snap_name}"))?;
-                self.tgt.import(img, snap_name, &mut export)
-            });
+            let mut export = self.src.export(&format!("{img}@{snap_name}"))?;
+            self.tgt.import(img, snap_name, &mut export)
+        });
 
         let (ok, failed_missing) = results.split();
 
@@ -123,7 +122,7 @@ impl<'t> BackupRun<'t> {
         let ready = Mutex::new(Vec::new());
         let partials = Mutex::new(Vec::new());
 
-        self.steps(4, images, |img| -> Result<()> {
+        self.steps(4, images, |img| {
             if self.tgt.need_rollback(&img)? {
                 partials.lock().unwrap().push(img.to_string());
             } else {
@@ -136,7 +135,7 @@ impl<'t> BackupRun<'t> {
         let mut partials = partials.into_inner().unwrap();
 
         self.stage("backup snapshots ready for import");
-        let results = self.chrono_steps(self.parallel.import, ready, |img| -> Result<()> {
+        let results = self.chrono_steps(self.parallel.import, ready, |img| {
             self.backup_snapshots(img)
         });
         partials.extend(results.all_err());
@@ -147,15 +146,14 @@ impl<'t> BackupRun<'t> {
             }
 
             self.stage("rollback partials to retry backup");
-            let results =
-                self.chrono_steps(self.parallel.rollback, partials, |img| -> Result<()> {
-                    self.tgt.rollback(img)
-                });
+            let results = self.chrono_steps(self.parallel.rollback, partials, |img| {
+                self.tgt.rollback(img)
+            });
             let (ready, failed) = results.split();
             partials = failed;
 
             self.stage("backup snapshots after rollback");
-            let results = self.chrono_steps(self.parallel.import, ready, |img| -> Result<()> {
+            let results = self.chrono_steps(self.parallel.import, ready, |img| {
                 self.backup_snapshots(img)
             });
             partials.extend(results.all_err());
