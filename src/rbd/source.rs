@@ -123,11 +123,12 @@ impl<'t> BackupRun<'t> {
         let partials = Mutex::new(Vec::new());
 
         self.steps(4, images, |img| {
-            if self.tgt.need_rollback(&img)? {
-                partials.lock().unwrap().push(img.to_string());
+            let list = if self.tgt.need_rollback(&img)? {
+                &partials
             } else {
-                ready.lock().unwrap().push(img.to_string());
-            }
+                &ready
+            };
+            list.lock().unwrap().push(img.to_string());
             Ok(())
         });
 

@@ -1,5 +1,4 @@
 pub mod rbd;
-pub mod semaphore;
 
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed as Ordering};
 use std::time::Duration;
