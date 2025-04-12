@@ -116,7 +116,7 @@ impl<'t> Local<'t> {
         self.run(&["trash", "move", "--expires-at=30 days", img])
     }
 
-    pub fn export(&self, src_spec: &str) -> Result<impl Read> {
+    pub fn export(&self, src_spec: &str) -> Result<impl Read + use<>> {
         let (cmd, args) = self.rbd_cmd(vec![
             "-p",
             self.pool,
@@ -128,7 +128,7 @@ impl<'t> Local<'t> {
         Ok(self.reader(duct::cmd(cmd, args).reader()?))
     }
 
-    pub fn export_diff(&self, img: &str, from_snap: &str, to_snap: &str) -> Result<impl Read> {
+    pub fn export_diff(&self, img: &str, from_snap: &str, to_snap: &str) -> Result<impl Read + use<>> {
         let (cmd, args) = self.rbd_cmd(vec![
             "-p",
             self.pool,
@@ -142,7 +142,7 @@ impl<'t> Local<'t> {
         Ok(self.reader(duct::cmd(cmd, args).reader()?))
     }
 
-    fn reader<R: std::io::Read>(&self, input: R) -> impl Read {
+    fn reader<R: std::io::Read>(&self, input: R) -> impl Read + use<R> {
         std::io::BufReader::with_capacity(self.buf_size, input)
     }
 

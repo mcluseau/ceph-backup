@@ -1,4 +1,4 @@
-from rust:1.84.0-alpine as build
+from rust:1.86.0-alpine as build
 
 run apk add musl-dev
 

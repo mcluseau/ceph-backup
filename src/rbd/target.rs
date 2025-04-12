@@ -70,11 +70,11 @@ pub fn run(
         let parallel = &parallel;
 
         scope.spawn(move || {
-            if let Err(e) = handle_connection(remote, &stream, rbd, parallel, expire_days) {
+            match handle_connection(remote, &stream, rbd, parallel, expire_days) { Err(e) => {
                 warn!("{remote}: failed: {e}");
-            } else {
+            } _ => {
                 info!("{remote}: done");
-            }
+            }}
         });
     })
 }

@@ -331,13 +331,13 @@ impl<'t> BackupRun<'t> {
             format!("{stage} [{done}/{total}]: ")
         };
 
-        if let Err(e) = result {
+        match result { Err(e) => {
             f_err(prefix, e);
             false
-        } else {
+        } _ => {
             f_ok(prefix);
             true
-        }
+        }}
     }
 }
 
