@@ -69,13 +69,16 @@ pub fn run(
         let rbd = &rbd;
         let parallel = &parallel;
 
-        scope.spawn(move || {
-            match handle_connection(remote, &stream, rbd, parallel, expire_days) { Err(e) => {
-                warn!("{remote}: failed: {e}");
-            } _ => {
-                info!("{remote}: done");
-            }}
-        });
+        scope.spawn(
+            move || match handle_connection(remote, &stream, rbd, parallel, expire_days) {
+                Err(e) => {
+                    warn!("{remote}: failed: {e}");
+                }
+                _ => {
+                    info!("{remote}: done");
+                }
+            },
+        );
     })
 }
 

@@ -1,4 +1,6 @@
 use clap::{Parser, Subcommand};
+use eyre::format_err;
+use log::info;
 
 use ceph_backup::rbd;
 
@@ -41,15 +43,18 @@ enum Commands {
         /// image name filter
         #[arg(short = 'F', long, default_value = "*")]
         filter: String,
-        /// Parallel snapshot creation operations
+        /// parallel snapshot creation operations
         #[arg(long, default_value = "4")]
         parallel_snap_create: u8,
-        /// Parallel import operations
+        /// parallel import operations
         #[arg(long, default_value = "2")]
         parallel_import: u8,
-        /// Parallel rollback operations
+        /// parallel rollback operations
         #[arg(long, default_value = "1")]
         parallel_rollback: u8,
+        /// make snapshots only (do not send backups)
+        #[arg(long)]
+        snapshots_only: bool,
     },
     RbdTarget {
         /// target pool
@@ -60,10 +65,10 @@ enum Commands {
         /// days before a snapshot is considered expired
         #[arg(long, default_value = "30")]
         expire_days: u16,
-        /// Parallel expire operations
+        /// parallel expire operations
         #[arg(long, default_value = "2")]
         parallel_expire: u8,
-        /// Import buffer size in KiB
+        /// import buffer size in KiB
         #[arg(long, default_value = "4096")]
         buffer_size: usize,
     },
@@ -89,6 +94,9 @@ fn main() -> eyre::Result<()> {
         ceph_backup::sigterm();
     })?;
 
+    let cluster = &cli.cluster;
+    let client_id = &cli.id;
+
     match cli.command {
         Commands::Rbd {
             pool,
@@ -99,20 +107,29 @@ fn main() -> eyre::Result<()> {
             parallel_snap_create,
             parallel_import,
             parallel_rollback,
-        } => rbd::source::run(
-            &cli.id,
-            &cli.cluster,
-            &pool,
-            &dest,
-            buffer_size << 10,
-            compress_level,
-            &filter,
-            rbd::source::Parallel {
+            snapshots_only,
+        } => {
+            info!("source: cluster {cluster}, pool {pool}");
+
+            let src = rbd::Local::new(client_id, cluster, &pool, buffer_size);
+
+            let tgt = if snapshots_only {
+                None
+            } else {
+                use std::net::ToSocketAddrs;
+                let dest = (dest.to_socket_addrs()?.next())
+                    .ok_or_else(|| format_err!("destination {dest} unknown"))?;
+                Some(rbd::target::Client::new(dest, compress_level))
+            };
+
+            let parallel = rbd::source::Parallel {
                 snap_create: parallel_snap_create,
                 import: parallel_import,
                 rollback: parallel_rollback,
-            },
-        ),
+            };
+
+            rbd::source::BackupRun::new(src, tgt, parallel).run(&filter)
+        }
         Commands::RbdTarget {
             pool,
             bind_addr,
@@ -120,8 +137,8 @@ fn main() -> eyre::Result<()> {
             parallel_expire,
             buffer_size,
         } => rbd::target::run(
-            &cli.id,
-            &cli.cluster,
+            client_id,
+            cluster,
             &pool,
             &bind_addr,
             expire_days,

@@ -14,49 +14,17 @@ pub struct Parallel {
     pub rollback: u8,
 }
 
-pub fn run(
-    client_id: &str,
-    cluster: &str,
-    pool: &str,
-    dest: &str,
-    buffer_size: usize,
-    compress_level: i32,
-    filter: &str,
-    parallel: Parallel,
-) -> Result<()> {
-    info!("source: cluster {cluster}, pool {pool}");
-
-    use std::net::ToSocketAddrs;
-    let dest = dest.to_socket_addrs()?.next().unwrap();
-
-    let src = rbd::Local::new(client_id, cluster, pool, buffer_size);
-    let tgt = rbd::target::Client::new(dest, compress_level);
-
-    BackupRun::new(src, tgt, parallel).run(filter)
-}
-
-struct BackupRun<'t> {
+pub struct BackupRun<'t> {
     src: rbd::Local<'t>,
-    tgt: rbd::target::Client,
-    n_steps: AtomicUsize,
-    n_done: AtomicUsize,
-    stage: &'t str,
+    tgt: Option<rbd::target::Client>,
     parallel: Parallel,
 }
 impl<'t> BackupRun<'t> {
-    fn new(src: rbd::Local<'t>, tgt: rbd::target::Client, parallel: Parallel) -> Self {
-        let zero = || AtomicUsize::new(0);
-        Self {
-            src,
-            tgt,
-            n_steps: zero(),
-            n_done: zero(),
-            stage: "init",
-            parallel,
-        }
+    pub fn new(src: rbd::Local<'t>, tgt: Option<rbd::target::Client>, parallel: Parallel) -> Self {
+        Self { src, tgt, parallel }
     }
 
-    fn run(&mut self, filter: &str) -> Result<()> {
+    pub fn run(&mut self, filter: &str) -> Result<()> {
         let today = now().date_naive();
 
         let images = self.src.ls()?;
@@ -65,9 +33,16 @@ impl<'t> BackupRun<'t> {
             .filter(|img| glob_match(filter, img))
             .collect();
 
+        let mut stage;
+        macro_rules! start {
+            ($desc:literal) => {
+                stage = Stage::new($desc);
+            };
+        }
+
         // --------------------------------------------------------------
-        self.stage("creating snapshots");
-        let results = self.steps(self.parallel.snap_create, images, |img| {
+        start!("creating snapshots");
+        let results = stage.steps(self.parallel.snap_create, images, |img| {
             let snapshots = self.src.snap_ls(img)?;
             let latest = snapshots.iter().filter_map(|s| s.timestamp().ok()).max();
 
@@ -78,11 +53,16 @@ impl<'t> BackupRun<'t> {
             }
             Ok(())
         });
+        stage.done();
+
+        let Some(tgt) = self.tgt.as_ref() else {
+            return Ok(());
+        };
 
         // --------------------------------------------------------------
-        self.stage("creating missing backups");
+        start!("creating missing backups");
 
-        let tgt_images = self.tgt.ls()?;
+        let tgt_images = tgt.ls()?;
 
         // dispatch existing and missing backups
         let mut missing_backups = Vec::new();
@@ -95,7 +75,7 @@ impl<'t> BackupRun<'t> {
             }
         }
 
-        let results = self.chrono_steps(self.parallel.import, missing_backups, |img| {
+        let results = stage.chrono_steps(self.parallel.import, missing_backups, |img| {
             let mut src_snaps = self.src.snap_ls(img)?;
             src_snaps.sort();
 
@@ -108,7 +88,7 @@ impl<'t> BackupRun<'t> {
             info!("{img}: backup is missing, creating from {snap_name}");
 
             let mut export = self.src.export(&format!("{img}@{snap_name}"))?;
-            self.tgt.import(img, snap_name, &mut export)
+            tgt.import(img, snap_name, &mut export)
         });
 
         let (ok, failed_missing) = results.split();
@@ -117,13 +97,15 @@ impl<'t> BackupRun<'t> {
         images.extend(ok);
         images.sort();
 
+        stage.done();
+
         // --------------------------------------------------------------
-        self.stage("analyzing target");
+        start!("analyzing target");
         let ready = Mutex::new(Vec::new());
         let partials = Mutex::new(Vec::new());
 
-        self.steps(4, images, |img| {
-            let list = if self.tgt.need_rollback(&img)? {
+        stage.steps(4, images, |img| {
+            let list = if tgt.need_rollback(&img)? {
                 &partials
             } else {
                 &ready
@@ -135,8 +117,10 @@ impl<'t> BackupRun<'t> {
         let ready = ready.into_inner().unwrap();
         let mut partials = partials.into_inner().unwrap();
 
-        self.stage("backup snapshots ready for import");
-        let results = self.chrono_steps(self.parallel.import, ready, |img| {
+        stage.done();
+
+        start!("backup snapshots ready for import");
+        let results = stage.chrono_steps(self.parallel.import, ready, |img| {
             self.backup_snapshots(img)
         });
         partials.extend(results.all_err());
@@ -146,34 +130,39 @@ impl<'t> BackupRun<'t> {
                 break;
             }
 
-            self.stage("rollback partials to retry backup");
-            let results = self.chrono_steps(self.parallel.rollback, partials, |img| {
-                self.tgt.rollback(img)
-            });
+            start!("rollback partials to retry backup");
+            let results =
+                stage.chrono_steps(self.parallel.rollback, partials, |img| tgt.rollback(img));
             let (ready, failed) = results.split();
             partials = failed;
 
-            self.stage("backup snapshots after rollback");
-            let results = self.chrono_steps(self.parallel.import, ready, |img| {
+            stage.done();
+
+            start!("backup snapshots after rollback");
+            let results = stage.chrono_steps(self.parallel.import, ready, |img| {
                 self.backup_snapshots(img)
             });
             partials.extend(results.all_err());
+
+            stage.done();
         }
 
         // --------------------------------------------------------------
-        self.stage("expiring remote backups");
-        if let Err(e) = self.tgt.expire() {
+        start!("expiring remote backups");
+        if let Err(e) = tgt.expire() {
             warn!("expiration failed: {e}");
         }
+        stage.done();
 
         // --------------------------------------------------------------
         if !partials.is_empty() {
-            self.stage("rollback partials diffs");
-            self.chrono_steps(
+            start!("rollback partials diffs");
+            stage.chrono_steps(
                 self.parallel.rollback,
                 partials.clone(),
-                |img| -> Result<()> { self.tgt.rollback(img) },
+                |img| -> Result<()> { tgt.rollback(img) },
             );
+            stage.done();
         }
 
         // --------------------------------------------------------------
@@ -193,6 +182,10 @@ impl<'t> BackupRun<'t> {
     }
 
     fn backup_snapshots(&self, img: &str) -> Result<()> {
+        let Some(tgt) = self.tgt.as_ref() else {
+            return Ok(());
+        };
+
         let mut src_snaps = self.src.snap_ls(img)?;
         src_snaps.sort();
 
@@ -201,7 +194,7 @@ impl<'t> BackupRun<'t> {
             return Ok(());
         }
 
-        let mut tgt_snaps = self.tgt.snap_ls(img)?;
+        let mut tgt_snaps = tgt.snap_ls(img)?;
         tgt_snaps.sort();
         let from_snap = tgt_snaps.into_iter().rev().next();
         let mut from_snap = from_snap.map(|s| s.name);
@@ -215,12 +208,12 @@ impl<'t> BackupRun<'t> {
                 warn!("{img}: no snapshots on target, recreating");
             }
 
-            self.tgt.trash_move(img)?;
+            tgt.trash_move(img)?;
 
             let snap_name = src_snaps.first().unwrap().name.clone();
 
             let mut export = self.src.export(&format!("{img}@{snap_name}"))?;
-            self.tgt.import(img, &snap_name, &mut export)?;
+            tgt.import(img, &snap_name, &mut export)?;
 
             from_snap = Some(snap_name);
         }
@@ -237,7 +230,7 @@ impl<'t> BackupRun<'t> {
 
             info!("{img}: sending diff {from_snap} -> {to_snap}");
             let mut export = self.src.export_diff(img, &from_snap, &to_snap)?;
-            self.tgt.import_diff(img, &mut export)?;
+            tgt.import_diff(img, &mut export)?;
 
             info!("{img}: removing source snapshot {from_snap}");
             self.src.snap_remove(img, &from_snap)?;
@@ -247,50 +240,42 @@ impl<'t> BackupRun<'t> {
 
         info!("{img}: sending metadata");
         let meta_list = self.src.meta_list(img)?;
-        self.tgt.meta_sync(img, &meta_list)?;
+        tgt.meta_sync(img, &meta_list)?;
 
         Ok(())
+    }
+}
+
+struct Stage<'t> {
+    desc: &'t str,
+    start: chrono::DateTime<chrono::Utc>,
+    n_steps: AtomicUsize,
+    n_done: AtomicUsize,
+}
+impl<'t> Stage<'t> {
+    fn new(desc: &'t str) -> Self {
+        info!("{desc}");
+        Self {
+            desc,
+            start: now(),
+            n_steps: AtomicUsize::new(0),
+            n_done: AtomicUsize::new(0),
+        }
+    }
+
+    fn done(self) {
+        info!(
+            "stage {} done in {}",
+            self.desc,
+            format_duration(now() - self.start)
+        );
     }
 
     fn n_steps(&self) -> usize {
         self.n_steps.load(Ordering::Relaxed)
     }
-    fn set_n_steps(&self, n: usize) {
-        self.n_steps.store(n, Ordering::Relaxed);
-    }
-
-    fn steps<F: Fn(&str) -> Result<()> + Send + Sync + Copy>(
-        &self,
-        parallel: u8,
-        steps: Vec<String>,
-        action: F,
-    ) -> Vec<(String, bool)> {
-        self.set_n_steps(steps.len());
-        crate::parallel_process(parallel, steps, |step| {
-            let ok = self.step(&step, action);
-            (step, ok)
-        })
-    }
-
-    /// process given steps, returning successful ones.
-    fn chrono_steps<F: Fn(&str) -> Result<()> + Send + Sync + Copy>(
-        &self,
-        parallel: u8,
-        steps: Vec<String>,
-        action: F,
-    ) -> Vec<(String, bool)> {
-        self.set_n_steps(steps.len());
-        crate::parallel_process(parallel, steps, |step| -> (String, bool) {
-            let ok = self.chrono_step(&step, action);
-            (step, ok)
-        })
-    }
-
-    fn stage(&mut self, stage: &'static str) {
-        info!("{stage}");
-        self.stage = stage;
-        self.n_steps.store(0, Ordering::Relaxed);
-        self.n_done.store(0, Ordering::Relaxed);
+    fn add_n_steps(&self, n: usize) {
+        self.n_steps.fetch_add(n, Ordering::AcqRel);
     }
 
     fn step<F>(&self, img: &str, action: F) -> bool
@@ -300,6 +285,7 @@ impl<'t> BackupRun<'t> {
         let result = action(img);
         self.step_result(result, |_| {}, |p, e| error!("{p}{img}: failed: {e}"))
     }
+
     fn chrono_step<F>(&self, img: &str, action: F) -> bool
     where
         F: Fn(&str) -> Result<()>,
@@ -315,29 +301,59 @@ impl<'t> BackupRun<'t> {
         )
     }
 
+    fn steps<F: Fn(&str) -> Result<()> + Send + Sync + Copy>(
+        &self,
+        parallel: u8,
+        steps: Vec<String>,
+        action: F,
+    ) -> Vec<(String, bool)> {
+        self.add_n_steps(steps.len());
+        crate::parallel_process(parallel, steps, |step| {
+            let ok = self.step(&step, action);
+            (step, ok)
+        })
+    }
+
+    /// process given steps, returning successful ones.
+    fn chrono_steps<F: Fn(&str) -> Result<()> + Send + Sync + Copy>(
+        &self,
+        parallel: u8,
+        steps: Vec<String>,
+        action: F,
+    ) -> Vec<(String, bool)> {
+        self.add_n_steps(steps.len());
+        crate::parallel_process(parallel, steps, |step| -> (String, bool) {
+            let ok = self.chrono_step(&step, action);
+            (step, ok)
+        })
+    }
+
     fn step_result<F: Fn(String), E: Fn(String, eyre::Report)>(
         &self,
         result: Result<()>,
         f_ok: F,
         f_err: E,
     ) -> bool {
-        let done = self.n_done.fetch_add(1, Ordering::Relaxed) + 1;
+        let done = self.n_done.fetch_add(1, Ordering::AcqRel) + 1;
         let total = self.n_steps();
 
-        let stage = self.stage;
+        let stage = self.desc;
         let prefix = if total == 0 {
             format!("{stage} [{done}]: ")
         } else {
             format!("{stage} [{done}/{total}]: ")
         };
 
-        match result { Err(e) => {
-            f_err(prefix, e);
-            false
-        } _ => {
-            f_ok(prefix);
-            true
-        }}
+        match result {
+            Err(e) => {
+                f_err(prefix, e);
+                false
+            }
+            _ => {
+                f_ok(prefix);
+                true
+            }
+        }
     }
 }
 
