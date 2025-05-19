@@ -2,5 +2,5 @@
 exec docker run --rm --user=$UID \
     -v $HOME/.cargo/registry:/usr/local/cargo/registry \
     -v $PWD:/src -w /src \
-    mcluseau/rust:1.86.0 \
+    mcluseau/rust:1.87.0 \
     cargo build -r --color=always
