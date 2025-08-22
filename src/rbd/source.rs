@@ -289,6 +289,13 @@ impl<'t> Stage<'t> {
         );
     }
 
+    fn inc_done(&self) {
+        self.n_done.fetch_add(1, Ordering::AcqRel);
+    }
+    fn n_done(&self) -> usize {
+        self.n_done.load(Ordering::Relaxed)
+    }
+
     fn n_steps(&self) -> usize {
         self.n_steps.load(Ordering::Relaxed)
     }
@@ -325,9 +332,22 @@ impl<'t> Stage<'t> {
         steps: Vec<String>,
         action: F,
     ) -> Vec<(String, bool)> {
+        use chrono::TimeDelta;
+        let notif = std::sync::Mutex::new(now());
+
         self.add_n_steps(steps.len());
         crate::parallel_process(parallel, steps, |step| {
             let ok = self.step(&step, action);
+
+            if let Ok(mut notif) = notif.lock() {
+                // show progress every 15s so the user knows we're not stuck
+                let now = now();
+                if now - *notif > TimeDelta::seconds(15) {
+                    info!("{}", self.progress_str());
+                    *notif = now;
+                }
+            }
+
             (step, ok)
         })
     }
@@ -346,21 +366,26 @@ impl<'t> Stage<'t> {
         })
     }
 
+    fn progress_str(&self) -> String {
+        let done = self.n_done();
+        let total = self.n_steps();
+
+        let stage = self.desc;
+        if total == 0 {
+            format!("{stage} [{done}]")
+        } else {
+            format!("{stage} [{done}/{total}]")
+        }
+    }
+
     fn step_result<F: Fn(String), E: Fn(String, eyre::Report)>(
         &self,
         result: Result<()>,
         f_ok: F,
         f_err: E,
     ) -> bool {
-        let done = self.n_done.fetch_add(1, Ordering::AcqRel) + 1;
-        let total = self.n_steps();
-
-        let stage = self.desc;
-        let prefix = if total == 0 {
-            format!("{stage} [{done}]: ")
-        } else {
-            format!("{stage} [{done}/{total}]: ")
-        };
+        self.inc_done();
+        let prefix = format!("{}: ", self.progress_str());
 
         match result {
             Err(e) => {
