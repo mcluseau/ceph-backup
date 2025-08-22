@@ -1,4 +1,4 @@
-from rust:1.87.0-alpine as build
+from rust:1.89.0-alpine as build
 
 run apk add musl-dev
 
@@ -11,7 +11,7 @@ run --mount=type=cache,id=rust-alpine-registry,target=/usr/local/cargo/registry 
     cargo build -r \
  && mv target/release/ceph-backup /dist/
 
-from alpine:3.21.0
+from alpine:3.22.0
 
 entrypoint ["/bin/ceph-backup"]
 run apk add --no-cache coreutils ceph-base
