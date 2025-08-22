@@ -18,10 +18,16 @@ pub struct BackupRun<'t> {
     src: rbd::Local<'t>,
     tgt: Option<rbd::target::Client>,
     parallel: Parallel,
+    pub do_snapshots: bool,
 }
 impl<'t> BackupRun<'t> {
     pub fn new(src: rbd::Local<'t>, tgt: Option<rbd::target::Client>, parallel: Parallel) -> Self {
-        Self { src, tgt, parallel }
+        Self {
+            src,
+            tgt,
+            parallel,
+            do_snapshots: true,
+        }
     }
 
     pub fn run(&mut self, filter: &str) -> Result<()> {
@@ -41,10 +47,22 @@ impl<'t> BackupRun<'t> {
         }
 
         // --------------------------------------------------------------
-        start!("creating snapshots");
+        if self.do_snapshots {
+            start!("creating snapshots");
+        } else {
+            start!("analyzing existing snapshots (NOT creating them)");
+        }
         let results = stage.steps(self.parallel.snap_create, images, |img| {
             let snapshots = self.src.snap_ls(img)?;
             let latest = snapshots.iter().filter_map(|s| s.timestamp().ok()).max();
+
+            if !self.do_snapshots {
+                return if latest.is_some() {
+                    Ok(())
+                } else {
+                    Err(format_err!("image has no snapshots"))
+                };
+            }
 
             if latest.is_none_or(|t| t.date() != today) {
                 let snap_name = now().format("bck-%Y%m%d_%H%M%S");

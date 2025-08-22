@@ -52,9 +52,12 @@ enum Commands {
         /// parallel rollback operations
         #[arg(long, default_value = "1")]
         parallel_rollback: u8,
-        /// make snapshots only (do not send backups)
+        /// do not send backups (only make snapshots)
         #[arg(long)]
-        snapshots_only: bool,
+        no_send: bool,
+        /// do not do snapshots (only send backups)
+        #[arg(long)]
+        no_snapshots: bool,
     },
     RbdTarget {
         /// target pool
@@ -107,13 +110,14 @@ fn main() -> eyre::Result<()> {
             parallel_snap_create,
             parallel_import,
             parallel_rollback,
-            snapshots_only,
+            no_send,
+            no_snapshots,
         } => {
             info!("source: cluster {cluster}, pool {pool}");
 
             let src = rbd::Local::new(client_id, cluster, &pool, buffer_size);
 
-            let tgt = if snapshots_only {
+            let tgt = if no_send {
                 None
             } else {
                 use std::net::ToSocketAddrs;
@@ -128,7 +132,11 @@ fn main() -> eyre::Result<()> {
                 rollback: parallel_rollback,
             };
 
-            rbd::source::BackupRun::new(src, tgt, parallel).run(&filter)
+            let mut backup = rbd::source::BackupRun::new(src, tgt, parallel);
+            if no_snapshots {
+                backup.do_snapshots = false;
+            }
+            backup.run(&filter)
         }
         Commands::RbdTarget {
             pool,
