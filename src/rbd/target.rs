@@ -8,7 +8,7 @@ use std::{
     thread,
 };
 
-use crate::rbd;
+use crate::{expiry::Expirer, rbd};
 
 pub struct Parallel {
     pub expire: u8,
@@ -19,7 +19,7 @@ pub fn run(
     cluster: &str,
     pool: &str,
     bind_addr: &str,
-    expire_days: u16,
+    expirer: &Expirer,
     buf_size: usize,
     parallel: Parallel,
 ) -> Result<()> {
@@ -70,7 +70,7 @@ pub fn run(
         let parallel = &parallel;
 
         scope.spawn(
-            move || match handle_connection(remote, &stream, rbd, parallel, expire_days) {
+            move || match handle_connection(remote, &stream, rbd, parallel, expirer) {
                 Err(e) => {
                     warn!("{remote}: failed: {e}");
                 }
@@ -100,7 +100,7 @@ fn handle_connection(
     mut stream: &TcpStream,
     rbd: &rbd::Local,
     parallel: &Parallel,
-    expire_days: u16,
+    expirer: &Expirer,
 ) -> Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(30)))?;
 
@@ -151,7 +151,7 @@ fn handle_connection(
             write_result(stream, rbd.import_diff(img, &mut zstd_in))?;
         }
         "expire" => {
-            write_result(stream, expire_backups(rbd, parallel.expire, expire_days))?;
+            write_result(stream, expire_backups(rbd, parallel.expire, expirer))?;
         }
         "meta_sync" => {
             let img = split.next().ok_or(format_err!("no image"))?;
@@ -173,13 +173,13 @@ fn handle_connection(
     Ok(())
 }
 
-fn expire_backups(rbd: &rbd::Local, parallel: u8, expire_days: u16) -> Result<()> {
-    let deadline = chrono::Utc::now().naive_utc() - chrono::TimeDelta::days(expire_days as i64);
+fn expire_backups(rbd: &rbd::Local, parallel: u8, expirer: &Expirer) -> Result<()> {
+    let t0 = chrono::Utc::now();
 
     let images = (rbd.ls()).map_err(|e| format_err!("failed to list images: {e}"))?;
 
     let results = crate::parallel_process(parallel, images, |img| -> bool {
-        rbd.expire_backups(&img, &deadline)
+        rbd.expire_backups(&img, t0, expirer)
             .inspect_err(|e| error!("{img}: {e}"))
             .is_ok()
     });

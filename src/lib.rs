@@ -1,3 +1,4 @@
+pub mod expiry;
 pub mod rbd;
 
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed as Ordering};

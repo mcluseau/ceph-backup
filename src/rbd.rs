@@ -1,11 +1,13 @@
 pub mod source;
 pub mod target;
 
-use chrono::NaiveDateTime;
+use chrono::{DateTime, NaiveDateTime, Utc};
 use eyre::{format_err, Result};
 use log::{error, info, warn};
 use std::collections::BTreeMap as Map;
 use std::io::Read;
+
+use crate::expiry::Expirer;
 
 const KEY_PARTIAL: &str = "bck-partial";
 
@@ -128,7 +130,12 @@ impl<'t> Local<'t> {
         Ok(self.reader(duct::cmd(cmd, args).reader()?))
     }
 
-    pub fn export_diff(&self, img: &str, from_snap: &str, to_snap: &str) -> Result<impl Read + use<>> {
+    pub fn export_diff(
+        &self,
+        img: &str,
+        from_snap: &str,
+        to_snap: &str,
+    ) -> Result<impl Read + use<>> {
         let (cmd, args) = self.rbd_cmd(vec![
             "-p",
             self.pool,
@@ -317,29 +324,29 @@ impl<'t> Local<'t> {
         self.meta_set(img, KEY_PARTIAL, &false)
     }
 
-    fn expire_backups(&self, img: &str, deadline: &chrono::NaiveDateTime) -> Result<()> {
+    fn expire_backups(&self, img: &str, t0: DateTime<Utc>, expirer: &Expirer) -> Result<()> {
         let snaps = self
             .snap_ls(&img)
             .map_err(|e| format_err!("failed to list snapshots: {e}"))?;
 
-        let mut removed = 0;
-        for snap in &snaps {
-            let Ok(ts) = snap.timestamp() else {
-                continue;
-            };
-            if &ts >= deadline {
-                continue;
-            }
+        let all_snaps_count = snaps.len();
 
-            let snap_name = &snap.name;
+        let snaps: Vec<_> = (snaps.into_iter())
+            .filter_map(|s| Some((s.timestamp().ok()?, s.name)))
+            .collect();
+
+        let expired = expirer.expired(t0, &snaps);
+
+        let mut removed = 0;
+        for snap_name in expired {
             info!("{img}: removing snapshot {snap_name}");
-            self.snap_remove(&img, &snap.name)
+            self.snap_remove(&img, &snap_name)
                 .map_err(|e| format_err!("failed to remove snapshot {snap_name}: {e}"))?;
 
             removed += 1;
         }
 
-        if removed == snaps.len() {
+        if removed == all_snaps_count {
             info!("{img}: no more snapshots, removing");
             if let Err(e) = self.remove(&img) {
                 warn!("{img}: failed to remove: {e}");
@@ -362,10 +369,7 @@ impl Snapshot {
     pub fn protected(&self) -> bool {
         self.protected == "true"
     }
-    pub fn timestamp(&self) -> Result<NaiveDateTime> {
-        Ok(NaiveDateTime::parse_from_str(
-            &self.timestamp,
-            "%a %b %d %H:%M:%S %Y",
-        )?)
+    pub fn timestamp(&self) -> Result<DateTime<Utc>> {
+        Ok(NaiveDateTime::parse_from_str(&self.timestamp, "%a %b %d %H:%M:%S %Y")?.and_utc())
     }
 }

@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use eyre::format_err;
 use log::info;
 
-use ceph_backup::rbd;
+use ceph_backup::{expiry::Expirer, rbd};
 
 #[derive(Parser)]
 #[command()]
@@ -65,9 +65,15 @@ enum Commands {
         /// bind (listen) address
         #[arg(long, default_value = DEFAULT_BIND)]
         bind_addr: String,
-        /// days before a snapshot is considered expired
-        #[arg(long, default_value = "30")]
+        /// how many daily snapshots
+        #[arg(long, default_value = "7")]
         expire_days: u16,
+        /// how many weekly snapshots
+        #[arg(long, default_value = "4")]
+        expire_weeks: u8,
+        /// how many monthly snapshots
+        #[arg(long, default_value = "3")]
+        expire_months: u8,
         /// parallel expire operations
         #[arg(long, default_value = "2")]
         parallel_expire: u8,
@@ -142,18 +148,28 @@ fn main() -> eyre::Result<()> {
             pool,
             bind_addr,
             expire_days,
+            expire_weeks,
+            expire_months,
             parallel_expire,
             buffer_size,
-        } => rbd::target::run(
-            client_id,
-            cluster,
-            &pool,
-            &bind_addr,
-            expire_days,
-            buffer_size << 10,
-            rbd::target::Parallel {
-                expire: parallel_expire,
-            },
-        ),
+        } => {
+            let expirer = &Expirer {
+                days: expire_days,
+                weeks: expire_weeks,
+                months: expire_months,
+            };
+
+            rbd::target::run(
+                client_id,
+                cluster,
+                &pool,
+                &bind_addr,
+                expirer,
+                buffer_size << 10,
+                rbd::target::Parallel {
+                    expire: parallel_expire,
+                },
+            )
+        }
     }
 }

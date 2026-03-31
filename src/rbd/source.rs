@@ -64,7 +64,7 @@ impl<'t> BackupRun<'t> {
                 };
             }
 
-            if latest.is_none_or(|t| t.date() != today) {
+            if latest.is_none_or(|t| t.date_naive() != today) {
                 let snap_name = now().format("bck-%Y%m%d_%H%M%S");
                 info!("{img}: creating today's snapshot: {snap_name}");
                 self.src.snap_create(img, &snap_name.to_string())?;
