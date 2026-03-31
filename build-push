@@ -1,0 +1,4 @@
+#! /bin/sh
+set -ex
+tag=$(git describe --exact-match) || tag=latest
+docker build . --push -t mcluseau/ceph-backup:$tag
