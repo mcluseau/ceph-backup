@@ -90,7 +90,7 @@ fn new_socket(addr: SocketAddr) -> io::Result<socket2::Socket> {
         .with_time(Duration::from_secs(30))
         .with_interval(Duration::from_secs(30));
     socket.set_tcp_keepalive(&keepalive)?;
-    socket.set_nodelay(false)?;
+    socket.set_tcp_nodelay(false)?;
 
     Ok(socket)
 }
